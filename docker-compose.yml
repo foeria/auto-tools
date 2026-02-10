@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: ./api_service
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - MONGODB_URI=mongodb://mongo:27017
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    depends_on:
+      - redis
+      - mongo
+    networks:
+      - crawler-network
+    volumes:
+      - ./screenshots:/app/screenshots
+      - ./templates:/app/templates
+
+  crawler:
+    build:
+      context: ./scrapy_project
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_HOST=redis
+      - MONGODB_URI=mongodb://mongo:27017
+    depends_on:
+      - redis
+      - mongo
+    networks:
+      - crawler-network
+    volumes:
+      - ./screenshots:/app/screenshots
+      - ./templates:/app/templates
+
+  frontend:
+    build:
+      context: ./admin-frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=http://api:8000
+    depends_on:
+      - api
+    networks:
+      - crawler-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - crawler-network
+    volumes:
+      - redis-data:/data
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    networks:
+      - crawler-network
+    volumes:
+      - mongo-data:/data
+
+networks:
+  crawler-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  mongo-data:
