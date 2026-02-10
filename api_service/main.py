@@ -6,10 +6,9 @@ import sys
 import os
 from pathlib import Path
 
-# 添加 scrapy_project 到 Python 路径
-sys.path.insert(0, str(Path(__file__).parent.parent / "scrapy_project"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -21,11 +20,21 @@ from contextlib import asynccontextmanager
 
 from utils.scheduler import TaskPriority, TaskStatus, Task
 from utils.storage import storage_manager
+from api_service.websocket_manager import ws_manager, WebSocketMessageType
+from api_service.execution_engine import execution_engine
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("API服务启动")
+    yield
+    logger.info("API服务关闭")
+
 
 app = FastAPI(
     title="智能爬虫API服务",
     description="提供任务管理、数据采集、数据转发等API接口",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 
@@ -115,8 +124,59 @@ class StatisticsResponse(BaseModel):
 tasks_db: Dict[str, Task] = {}
 
 
+@app.websocket("/ws/tasks")
+async def websocket_tasks(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                message = json.loads(data)
+                msg_type = message.get("type")
+                
+                if msg_type == "subscribe":
+                    task_id = message.get("task_id")
+                    if task_id:
+                        await ws_manager.connect(websocket, task_id)
+                
+                elif msg_type == "unsubscribe":
+                    task_id = message.get("task_id")
+                    if task_id:
+                        ws_manager.disconnect(websocket, task_id)
+                
+                elif msg_type == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong", "timestamp": datetime.now().isoformat()}))
+                
+            except json.JSONDecodeError:
+                pass
+    
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+        logger.info("WebSocket客户端断开连接")
+
+
+@app.websocket("/ws/tasks/{task_id}")
+async def websocket_task_detail(websocket: WebSocket, task_id: str):
+    await ws_manager.connect(websocket, task_id)
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                message = json.loads(data)
+                if message.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong", "timestamp": datetime.now().isoformat()}))
+            except json.JSONDecodeError:
+                pass
+    
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket, task_id)
+        logger.info(f"WebSocket客户端断开连接: task_id={task_id}")
+
+
 @app.post("/api/tasks", response_model=TaskResponse, tags=["任务管理"])
-async def create_task(task_data: TaskCreate):
+async def create_task(task_data: TaskCreate, background_tasks: BackgroundTasks):
     task_id = str(uuid.uuid4())
     
     task = Task(
@@ -130,6 +190,16 @@ async def create_task(task_data: TaskCreate):
     
     tasks_db[task_id] = task
     
+    background_tasks.add_task(
+        execution_engine.execute_task,
+        task_id=task_id,
+        url=task_data.url,
+        actions=task_data.actions,
+        priority=task_data.priority,
+        max_retries=task_data.max_retries,
+        metadata=task_data.metadata
+    )
+    
     storage_manager.save_task_with_queue(task.to_dict(), task_data.priority)
     
     logger.info(f"Task created: {task_id}")
@@ -137,7 +207,7 @@ async def create_task(task_data: TaskCreate):
     return TaskResponse(
         task_id=task_id,
         status="created",
-        message="任务已创建，等待执行"
+        message="任务已创建，正在执行"
     )
 
 
@@ -200,6 +270,28 @@ async def get_task(task_id: str):
     )
 
 
+@app.get("/api/tasks/{task_id}/status", tags=["任务管理"])
+async def get_task_status(task_id: str):
+    task_info = execution_engine.get_task_status(task_id)
+    
+    if task_info:
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "executing": task_info
+        }
+    
+    if task_id not in tasks_db:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task = tasks_db[task_id]
+    return {
+        "task_id": task_id,
+        "status": task.status.value,
+        "executing": None
+    }
+
+
 @app.delete("/api/tasks/{task_id}", tags=["任务管理"])
 async def delete_task(task_id: str):
     if task_id not in tasks_db:
@@ -214,22 +306,58 @@ async def delete_task(task_id: str):
 
 
 @app.post("/api/tasks/{task_id}/retry", response_model=TaskResponse, tags=["任务管理"])
-async def retry_task(task_id: str):
+async def retry_task(task_id: str, background_tasks: BackgroundTasks):
     if task_id not in tasks_db:
         raise HTTPException(status_code=404, detail="任务不存在")
     
     task = tasks_db[task_id]
+    
     task.status = TaskStatus.PENDING
     task.error = None
     task.current_retry = 0
+    
+    background_tasks.add_task(
+        execution_engine.execute_task,
+        task_id=task_id,
+        url=task.url,
+        actions=task.actions,
+        priority=task.priority.value,
+        max_retries=task.max_retries,
+        metadata=task.metadata
+    )
     
     storage_manager.save_task_with_queue(task.to_dict(), task.priority.value)
     
     return TaskResponse(
         task_id=task_id,
         status="retry",
-        message="任务已重新入队"
+        message="任务已重新入队执行"
     )
+
+
+@app.post("/api/tasks/{task_id}/cancel", tags=["任务管理"])
+async def cancel_task(task_id: str):
+    task_info = execution_engine.get_task_status(task_id)
+    
+    if task_info:
+        task_info["status"] = "cancelled"
+        del execution_engine.executing_tasks[task_id]
+    
+    if task_id not in tasks_db:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task = tasks_db[task_id]
+    task.status = TaskStatus.CANCELLED
+    
+    await ws_manager.send_task_status(
+        task_id=task_id,
+        status="cancelled",
+        progress=0,
+        current_action="任务已取消",
+        message="用户取消任务执行"
+    )
+    
+    return {"message": "任务已取消"}
 
 
 @app.get("/api/templates", response_model=List[TemplateResponse], tags=["模板管理"])
@@ -324,11 +452,35 @@ async def get_statistics():
     )
 
 
+@app.get("/api/executing-tasks", tags=["监控"])
+async def get_executing_tasks():
+    return {
+        "count": len(execution_engine.executing_tasks),
+        "tasks": execution_engine.get_all_executing_tasks()
+    }
+
+
 @app.get("/api/actions", tags=["系统信息"])
 async def get_available_actions():
     return {
-        "actions": dispatcher.get_available_actions(),
-        "extractors": extractor.get_available_extractors()
+        "actions": [
+            {"type": "goto", "name": "访问页面", "icon": "Location"},
+            {"type": "click", "name": "点击元素", "icon": "Pointer"},
+            {"type": "input", "name": "输入内容", "icon": "Edit"},
+            {"type": "wait", "name": "等待", "icon": "Clock"},
+            {"type": "scroll", "name": "页面滚动", "icon": "Bottom"},
+            {"type": "screenshot", "name": "截图", "icon": "Picture"},
+            {"type": "extract", "name": "提取数据", "icon": "Document"},
+            {"type": "press", "name": "键盘操作", "icon": "Keyboard"},
+            {"type": "hover", "name": "悬停", "icon": "Pointer"},
+            {"type": "upload", "name": "上传文件", "icon": "Upload"},
+            {"type": "evaluate", "name": "执行脚本", "icon": "Code"},
+            {"type": "switch_frame", "name": "切换框架", "icon": "Menu"},
+            {"type": "switch_tab", "name": "切换标签页", "icon": "CopyDocument"},
+            {"type": "new_tab", "name": "打开新标签页", "icon": "DocumentAdd"},
+            {"type": "close_tab", "name": "关闭标签页", "icon": "Remove"},
+            {"type": "drag", "name": "拖拽", "icon": "Rank"}
+        ]
     }
 
 
@@ -337,10 +489,13 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now(),
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "executing_tasks": len(execution_engine.executing_tasks),
+        "total_tasks": len(tasks_db)
     }
 
 
+import json
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

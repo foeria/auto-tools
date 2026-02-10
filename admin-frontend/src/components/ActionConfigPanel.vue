@@ -131,7 +131,7 @@
         <template v-if="actionType === 'extract'">
           <el-form-item label="选择器列表">
             <el-row 
-              v-for="(selector, index) in config.selectors" 
+              v-for="(_, index) in config.selectors" 
               :key="index"
               :gutter="10"
               style="margin-bottom: 10px"
@@ -286,7 +286,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, computed } from 'vue'
+import { ref, reactive, watch } from 'vue'
 import { Setting, Delete, Plus, Upload } from '@element-plus/icons-vue'
 
 const props = defineProps<{

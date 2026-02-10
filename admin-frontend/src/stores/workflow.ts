@@ -9,6 +9,7 @@ export interface ActionNode {
   description: string
   category: 'browser' | 'interaction' | 'extraction' | 'control' | 'ai' | 'file'
   config: Record<string, any>
+  position?: { x: number; y: number }
   children?: ActionNode[]
 }
 
@@ -286,6 +287,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
     }
   }
   
+  function updateNodePosition(nodeId: string, position: { x: number; y: number }) {
+    const node = currentWorkflow.value.find(n => n.id === nodeId)
+    if (node) {
+      node.position = position
+    }
+  }
+  
   function reorderNodes(fromIndex: number, toIndex: number) {
     const [removed] = currentWorkflow.value.splice(fromIndex, 1)
     currentWorkflow.value.splice(toIndex, 0, removed)
@@ -312,6 +320,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     addNodeToWorkflow,
     removeNodeFromWorkflow,
     updateNodeConfig,
+    updateNodePosition,
     reorderNodes,
     clearWorkflow,
     loadWorkflow,

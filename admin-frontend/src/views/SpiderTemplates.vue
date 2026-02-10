@@ -197,7 +197,8 @@ const currentTemplate = reactive<Template>({
   name: '',
   description: '',
   url_pattern: '',
-  actions: []
+  actions: [],
+  created_at: new Date().toISOString()
 })
 
 function generateMockTemplates(): Template[] {

@@ -182,15 +182,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, View, VideoPlay, Delete } from '@element-plus/icons-vue'
 import axios from 'axios'
 
-interface Action {
-  type: string
-  [key: string]: any
-}
-
 interface Task {
   id: string
   url: string
-  actions: Action[]
+  actions: any[]
   actions_count?: number
   status: string
   result?: any
@@ -246,12 +241,17 @@ function formatDate(dateStr: string): string {
 
 async function fetchTasks() {
   try {
-    const response = await axios.get('http://localhost:8000/api/tasks')
-    tasks.value = response.data.map((task: any) => ({
+    const params = new URLSearchParams()
+    if (statusFilter.value) params.append('status', statusFilter.value)
+    params.append('limit', '100')
+    params.append('offset', '0')
+    
+    const response = await axios.get(`http://localhost:8000/api/tasks?${params.toString()}`)
+    tasks.value = response.data.tasks.map((task: any) => ({
       ...task,
       actions_count: task.actions?.length || 0
     }))
-    totalTasks.value = tasks.value.length
+    totalTasks.value = response.data.total
   } catch (error) {
     console.error('获取任务列表失败:', error)
     tasks.value = generateMockTasks()
@@ -329,8 +329,9 @@ function handlePageChange(val: number) {
   currentPage.value = val
 }
 
-function refreshTasks() {
-  fetchTasks()
+async function refreshTasks() {
+  ElMessage.info('正在刷新...')
+  await fetchTasks()
   ElMessage.success('已刷新')
 }
 
@@ -345,10 +346,21 @@ async function reRunTask(task: Task) {
       confirmButtonText: '确定',
       cancelButtonText: '取消'
     })
-    ElMessage.info('任务已重新提交')
+    
+    ElMessage.info('正在重新提交任务...')
+    
+    const response = await axios.post(`http://localhost:8000/api/tasks/${task.id}/retry`)
+    
+    ElMessage.success(`任务已重新提交，新任务ID: ${response.data.task_id}`)
+    await fetchTasks()
     detailDialogVisible.value = false
-  } catch {
-    ElMessage.info('取消操作')
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('重新运行任务失败:', error)
+      ElMessage.error(error.response?.data?.detail || '重新运行任务失败')
+    } else {
+      ElMessage.info('取消操作')
+    }
   }
 }
 
@@ -359,11 +371,18 @@ async function deleteTask(taskId: string) {
       cancelButtonText: '取消',
       type: 'warning'
     })
+    
+    await axios.delete(`http://localhost:8000/api/tasks/${taskId}`)
     tasks.value = tasks.value.filter(t => t.id !== taskId)
     totalTasks.value = tasks.value.length
     ElMessage.success('任务已删除')
-  } catch {
-    ElMessage.info('取消删除')
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('删除任务失败:', error)
+      ElMessage.error(error.response?.data?.detail || '删除任务失败')
+    } else {
+      ElMessage.info('取消删除')
+    }
   }
 }
 

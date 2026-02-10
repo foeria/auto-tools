@@ -42,14 +42,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import { Monitor, Operation, List, Document, DataLine, Setting } from '@element-plus/icons-vue'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 
 const locale = zhCn
 const route = useRoute()
-const router = useRouter()
 
 const activeMenu = computed(() => route.path)
 </script>

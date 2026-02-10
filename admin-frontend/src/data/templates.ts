@@ -145,8 +145,7 @@ export const workflowTemplates: WorkflowTemplate[] = [
     extractors: [
       {
         type: 'api',
-        url_pattern: '/api/',
-        timeout: 5000
+        url_pattern: '/api/'
       },
       {
         type: 'json',
