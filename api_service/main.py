@@ -18,8 +18,8 @@ import httpx
 import asyncio
 from contextlib import asynccontextmanager
 
-from utils.scheduler import TaskPriority, TaskStatus, Task
-from utils.storage import storage_manager
+from scrapy_project.utils.scheduler import TaskPriority, TaskStatus, Task
+from scrapy_project.utils.storage import storage_manager
 from api_service.websocket_manager import ws_manager, WebSocketMessageType
 from api_service.execution_engine import execution_engine
 

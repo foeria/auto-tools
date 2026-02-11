@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venvScriptspython.exe:*)",
+      "Bash(\"/c/Users/86198/Desktop/auto-tools/.venv/Scripts/python.exe\" -c \"import sys; sys.path.insert\\(0, ''/c/Users/86198/Desktop/auto-tools''\\); from scrapy_project.utils.scheduler import TaskPriority, TaskStatus, Task; print\\(''Import successful!''\\)\")"
+    ]
+  }
+}
