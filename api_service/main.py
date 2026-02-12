@@ -4,11 +4,14 @@ API服务模块
 """
 import sys
 import os
+import json
+import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -22,6 +25,9 @@ from scrapy_project.utils.scheduler import TaskPriority, TaskStatus, Task
 from scrapy_project.utils.storage import storage_manager
 from api_service.websocket_manager import ws_manager, WebSocketMessageType
 from api_service.execution_engine import execution_engine
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,6 +43,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# 添加CORS中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允许所有来源，生产环境建议指定具体域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class TaskCreate(BaseModel):
     url: str = Field(..., description="目标URL")
@@ -45,6 +60,7 @@ class TaskCreate(BaseModel):
     priority: int = Field(default=1, ge=0, le=3, description="优先级 0-3")
     max_retries: int = Field(default=3, ge=0, le=10, description="最大重试次数")
     metadata: Dict[str, Any] = Field(default={}, description="元数据")
+    headless: bool = Field(default=False, description="是否使用无头模式运行浏览器")
 
 
 class TaskResponse(BaseModel):
@@ -178,7 +194,7 @@ async def websocket_task_detail(websocket: WebSocket, task_id: str):
 @app.post("/api/tasks", response_model=TaskResponse, tags=["任务管理"])
 async def create_task(task_data: TaskCreate, background_tasks: BackgroundTasks):
     task_id = str(uuid.uuid4())
-    
+
     task = Task(
         task_id=task_id,
         url=task_data.url,
@@ -187,9 +203,9 @@ async def create_task(task_data: TaskCreate, background_tasks: BackgroundTasks):
         max_retries=task_data.max_retries,
         metadata=task_data.metadata
     )
-    
+
     tasks_db[task_id] = task
-    
+
     background_tasks.add_task(
         execution_engine.execute_task,
         task_id=task_id,
@@ -197,13 +213,14 @@ async def create_task(task_data: TaskCreate, background_tasks: BackgroundTasks):
         actions=task_data.actions,
         priority=task_data.priority,
         max_retries=task_data.max_retries,
-        metadata=task_data.metadata
+        metadata=task_data.metadata,
+        headless=task_data.headless
     )
-    
+
     storage_manager.save_task_with_queue(task.to_dict(), task_data.priority)
-    
-    logger.info(f"Task created: {task_id}")
-    
+
+    logger.info(f"Task created: {task_id} (headless={task_data.headless})")
+
     return TaskResponse(
         task_id=task_id,
         status="created",
@@ -337,18 +354,34 @@ async def retry_task(task_id: str, background_tasks: BackgroundTasks):
 
 @app.post("/api/tasks/{task_id}/cancel", tags=["任务管理"])
 async def cancel_task(task_id: str):
+    # 首先关闭浏览器（如果正在运行）
+    if task_id in execution_engine.browser_contexts:
+        try:
+            browser, page = execution_engine.browser_contexts[task_id]
+            if page:
+                await page.close()
+            if browser:
+                await browser.close()
+            logger.info(f"Browser closed for cancelled task: {task_id}")
+        except Exception as e:
+            logger.error(f"Error closing browser during cancel: {e}")
+
+    # 设置任务状态为已取消
     task_info = execution_engine.get_task_status(task_id)
-    
+
     if task_info:
         task_info["status"] = "cancelled"
+
+    # 从执行任务中移除（这会触发CancelledError）
+    if task_id in execution_engine.executing_tasks:
         del execution_engine.executing_tasks[task_id]
-    
+
     if task_id not in tasks_db:
         raise HTTPException(status_code=404, detail="任务不存在")
-    
+
     task = tasks_db[task_id]
     task.status = TaskStatus.CANCELLED
-    
+
     await ws_manager.send_task_status(
         task_id=task_id,
         status="cancelled",
@@ -356,22 +389,22 @@ async def cancel_task(task_id: str):
         current_action="任务已取消",
         message="用户取消任务执行"
     )
-    
+
     return {"message": "任务已取消"}
 
 
 @app.get("/api/templates", response_model=List[TemplateResponse], tags=["模板管理"])
 async def list_templates():
-    templates = storage_manager.mongo.list_templates()
-    
+    templates = storage_manager.db.list_templates()
+
     return [
         TemplateResponse(
             id=t['id'],
             name=t['name'],
             description=t.get('description', ''),
             url_pattern=t.get('url_pattern', ''),
-            actions=t['actions'],
-            extractors=t.get('extractors', []),
+            actions=json.loads(t['actions']) if isinstance(t.get('actions'), str) else t.get('actions', []),
+            extractors=json.loads(t['extractors']) if isinstance(t.get('extractors'), str) else t.get('extractors', []),
             created_at=datetime.fromisoformat(t['created_at']) if isinstance(t.get('created_at'), str) else t.get('created_at', datetime.now())
         )
         for t in templates
@@ -381,7 +414,7 @@ async def list_templates():
 @app.post("/api/templates", response_model=TemplateResponse, tags=["模板管理"])
 async def create_template(template_data: TemplateCreate):
     template_id = str(uuid.uuid4())
-    
+
     template = {
         'id': template_id,
         'name': template_data.name,
@@ -391,9 +424,9 @@ async def create_template(template_data: TemplateCreate):
         'extractors': template_data.extractors,
         'created_at': datetime.now()
     }
-    
-    storage_manager.mongo.save_template(template)
-    
+
+    storage_manager.db.save_template(template)
+
     return TemplateResponse(
         id=template_id,
         name=template_data.name,
@@ -407,11 +440,11 @@ async def create_template(template_data: TemplateCreate):
 
 @app.delete("/api/templates/{template_id}", tags=["模板管理"])
 async def delete_template(template_id: str):
-    success = storage_manager.mongo.delete_template(template_id)
-    
+    success = storage_manager.db.delete_template(template_id)
+
     if not success:
         raise HTTPException(status_code=404, detail="模板不存在")
-    
+
     return {"message": "模板已删除"}
 
 
@@ -493,9 +526,3 @@ async def health_check():
         "executing_tasks": len(execution_engine.executing_tasks),
         "total_tasks": len(tasks_db)
     }
-
-
-import json
-import logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)

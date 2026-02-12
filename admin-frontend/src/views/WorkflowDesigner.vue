@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { VueFlow, useVueFlow, type Node, type Edge, type Connection } from '@vue-flow/core'
 import '@vue-flow/core/dist/style.css'
@@ -11,7 +12,7 @@ import NodeConfigPanel from '@/components/workflow/NodeConfigPanel.vue'
 import ExecutionMonitor from '@/components/ExecutionMonitor.vue'
 import { useWorkflowStore, type ActionNode } from '@/stores/workflow'
 import { taskApi } from '@/services/api'
-import { useWebSocket } from '@/services/websocket'
+import { useWebSocket, wsService } from '@/services/websocket'
 import { useWorkflowValidation } from '@/composables/useWorkflowValidation'
 import { useNodeSearch } from '@/composables/useNodeSearch'
 import { 
@@ -31,6 +32,8 @@ import {
 } from '@element-plus/icons-vue'
 
 const store = useWorkflowStore()
+const route = useRoute()
+const router = useRouter()
 const { connect: wsConnect, subscribe: wsSubscribe } = useWebSocket()
 
 const {
@@ -56,6 +59,8 @@ const currentTaskId = ref<string | null>(null)
 const monitorRef = ref<any>(null)
 const showValidationPanel = ref(false)
 const showSearchPanel = ref(false)
+const runDialogVisible = ref(false)  // 运行确认对话框
+const headlessMode = ref(false)  // 无头模式
 
 const {
   validateWorkflow,
@@ -85,6 +90,105 @@ const {
   getAllNodeTypes,
   getAllCategories
 } = useNodeSearch(workflowNodes)
+
+// WebSocket连接状态管理
+let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+// 等待WebSocket连接建立的辅助函数
+async function waitForConnection(timeout = 5000): Promise<boolean> {
+  const startTime = Date.now()
+  while (Date.now() - startTime < timeout) {
+    if (wsService.isOpen()) {
+      return true
+    }
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  return false
+}
+
+// 从URL参数加载工作流
+onMounted(() => {
+  const workflowIdFromQuery = route.query.workflowId as string
+  const templateIdFromQuery = route.query.templateId as string
+
+  if (workflowIdFromQuery) {
+    // 从localStorage加载指定的工作流
+    const storedData = localStorage.getItem(`workflow_${workflowIdFromQuery}`)
+    if (storedData) {
+      try {
+        const data = JSON.parse(storedData)
+        loadWorkflowData(data)
+        ElMessage.success(`已加载工作流: ${data.name}`)
+        // 清除URL参数，防止刷新时重复加载
+        router.replace({ query: {} })
+      } catch (e) {
+        console.error('加载工作流失败:', e)
+        ElMessage.error('加载工作流失败')
+      }
+    } else {
+      ElMessage.warning('工作流不存在或已被删除')
+      router.replace({ query: {} })
+    }
+  } else if (templateIdFromQuery) {
+    // 处理模板ID（如果需要）
+    ElMessage.info('模板功能开发中')
+    router.replace({ query: {} })
+  }
+
+  // 加载工作流列表
+  loadSavedWorkflows()
+})
+
+// 监听节点变化，同步 selectedNode 状态
+watch(workflowNodes, () => {
+  if (selectedNode.value) {
+    const node = workflowNodes.value.find(n => n.id === selectedNode.value?.id)
+    if (!node) {
+      selectedNode.value = null
+    }
+  }
+}, { deep: true })
+
+function loadWorkflowData(data: any) {
+  workflowName.value = data.name || ''
+  workflowId.value = data.id || null
+
+  // 转换VueFlow格式的节点
+  if (data.nodes && Array.isArray(data.nodes)) {
+    workflowNodes.value = data.nodes.map((node: any) => ({
+      id: node.id,
+      type: node.type,
+      position: node.position,
+      data: node.data,
+      label: node.label
+    }))
+  }
+
+  // 转换边
+  if (data.edges && Array.isArray(data.edges)) {
+    workflowEdges.value = data.edges.map((edge: any) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      type: edge.type || 'default',
+      animated: edge.animated,
+      style: edge.style,
+      label: edge.label
+    }))
+  }
+
+  // 更新nodeIdCounter
+  if (workflowNodes.value.length > 0) {
+    const maxId = workflowNodes.value.reduce((max: number, node: any) => {
+      const match = node.id.match(/node-(\d+)-/)
+      if (match) {
+        return Math.max(max, parseInt(match[1]))
+      }
+      return max
+    }, 0)
+    nodeIdCounter = maxId
+  }
+}
 
 let nodeIdCounter = 0
 
@@ -324,15 +428,15 @@ async function runWorkflow() {
     ElMessage.warning('请先添加节点到工作流')
     return
   }
-  
+
   const validation = validateWorkflow(workflowNodes.value, workflowEdges.value)
-  
+
   if (!validation.isValid) {
     showValidationPanel.value = true
     ElMessage.error(`工作流存在 ${validation.errors.length} 个错误，无法运行`)
     return
   }
-  
+
   if (validation.warnings.length > 0) {
     ElNotification({
       title: '验证建议',
@@ -341,15 +445,16 @@ async function runWorkflow() {
       duration: 4000
     })
   }
-  
+
+  // 显示运行确认对话框
+  runDialogVisible.value = true
+}
+
+async function confirmRun() {
+  runDialogVisible.value = false
+  isRunning.value = true
+
   try {
-    await ElMessageBox.confirm('确定要运行当前工作流吗？', '确认运行', {       
-      confirmButtonText: '运行',
-      cancelButtonText: '取消'
-    })
-    
-    isRunning.value = true
-    
     const actions = workflowNodes.value.map(node => {
       const nodeData = node.data as ActionNode & { id: string }
       return {
@@ -391,45 +496,52 @@ async function runWorkflow() {
         index: nodeData.config?.index || 0
       }
     })
-    
-    const firstNode = workflowNodes.value[0]?.data as ActionNode
-    const startUrl = (firstNode?.config?.url as string) || ''
-    
+
+    // 查找第一个需要URL的节点（goto类型）
+    const gotoNode = workflowNodes.value.find(node => (node.data as ActionNode)?.type === 'goto')
+    const startUrl = gotoNode ? (gotoNode.data as ActionNode).config?.url || '' : ''
+
     if (!startUrl) {
-      ElMessage.warning('请在第一个节点中设置起始URL')
+      ElMessage.warning('请添加访问页面节点并设置起始URL')
       isRunning.value = false
       return
     }
-    
+
     const taskData = {
       url: startUrl,
       actions: actions as any[],
-      priority: 5,
+      priority: 1,
       max_retries: 3,
+      headless: headlessMode.value,
       metadata: {
         workflow_id: workflowId.value || 'unknown',
         workflow_name: workflowName.value || '未命名工作流',
         created_at: new Date().toISOString()
       }
     }
-    
-    try {
-      const response = await taskApi.create(taskData)
-      ElMessage.success(`任务已提交成功！任务ID: ${response.task_id}`)
-      
-      currentTaskId.value = response.task_id
-      
+
+    const response = await taskApi.create(taskData)
+    ElMessage.success(`任务已提交成功！任务ID: ${response.task_id}`)
+
+    currentTaskId.value = response.task_id
+
+    // 确保WebSocket连接已建立
+    if (!wsService.isOpen()) {
       wsConnect()
-      wsSubscribe(response.task_id)
-      
-      showMonitor.value = true
-      
-    } catch (error: any) {
-      console.error('Failed to create task:', error)
-      ElMessage.error(`任务提交失败: ${error.response?.data?.detail || error.message || '未知错误'}`)
+      const connected = await waitForConnection()
+      if (!connected) {
+        ElMessage.error('WebSocket连接失败，请检查后端服务')
+        isRunning.value = false
+        return
+      }
     }
-  } catch {
-    ElMessage.info('取消运行')
+    wsSubscribe(response.task_id)
+
+    showMonitor.value = true
+
+  } catch (error: any) {
+    console.error('Failed to create task:', error)
+    ElMessage.error(`任务提交失败: ${error.response?.data?.detail || error.message || '未知错误'}`)
   } finally {
     isRunning.value = false
   }
@@ -478,6 +590,15 @@ function onPaneClick() {
 }
 
 function onKeyDown(event: KeyboardEvent) {
+  // 如果当前焦点在输入元素中，不处理键盘事件（防止误操作）
+  const target = event.target as HTMLElement
+  const tagName = target.tagName.toLowerCase()
+  const isInputElement = tagName === 'input' || tagName === 'textarea' || tagName === 'select'
+
+  if (isInputElement) {
+    return
+  }
+
   if (event.key === 'Delete' || event.key === 'Backspace') {
     if (selectedEdgeId.value) {
       deleteEdge(selectedEdgeId.value)
@@ -985,6 +1106,47 @@ function exportWorkflow() {
       </template>
     </el-dialog>
 
+    <!-- 运行确认对话框 -->
+    <el-dialog v-model="runDialogVisible" title="运行工作流" width="450px">
+      <div class="run-config">
+        <el-alert
+          title="即将开始执行工作流"
+          type="info"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 20px"
+        />
+        <el-form label-width="100px">
+          <el-form-item label="浏览器模式">
+            <el-switch
+              v-model="headlessMode"
+              active-text="无头模式"
+              inactive-text="有头模式"
+              active-description="不显示浏览器窗口"
+              inactive-description="显示浏览器窗口"
+            />
+          </el-form-item>
+          <el-form-item label="运行说明">
+            <div class="run-tips">
+              <el-tag :type="headlessMode ? 'info' : 'success'" size="small" style="margin-right: 8px">
+                {{ headlessMode ? '无头模式' : '有头模式' }}
+              </el-tag>
+              <span v-if="headlessMode">
+                浏览器将在后台运行，不显示窗口界面，适合批量任务
+              </span>
+              <span v-else>
+                浏览器窗口将显示，可以看到实时执行过程
+              </span>
+            </div>
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="runDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmRun">开始运行</el-button>
+      </template>
+    </el-dialog>
+
     <el-drawer
       v-model="showValidationPanel"
       title="工作流验证"
@@ -1453,11 +1615,19 @@ export default {
         font-size: 12px;
         color: var(--el-text-color-regular);
         transition: background-color 0.2s;
-        
+
         &:hover {
           background: var(--el-fill-color-light);
         }
       }
+    }
+  }
+
+  .run-config {
+    .run-tips {
+      color: var(--el-text-color-secondary);
+      font-size: 13px;
+      line-height: 1.6;
     }
   }
 }

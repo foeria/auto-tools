@@ -1,240 +1,380 @@
 """
 数据存储模块
-支持MongoDB和Redis存储
+使用 SQLite 实现轻量级存储（替代 MongoDB）
 """
+import sqlite3
+import json
+import os
 from typing import Any, Dict, List, Optional
 from datetime import datetime
-from pymongo import MongoClient
-from pymongo.collection import Collection
-from pymongo.database import Database
-import redis
-import json
 import logging
 
 logger = logging.getLogger(__name__)
 
+# 数据库文件路径
+DB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(DB_DIR, 'data', 'storage.db')
 
-class MongoDBStorage:
-    """MongoDB存储"""
-    
-    def __init__(self, uri: str = 'mongodb://localhost:27017', db_name: str = 'smart_crawler'):
-        self.client = MongoClient(uri)
-        self.db: Database = self.client[db_name]
-        self._tasks_collection = None
-        self._data_collection = None
-        self._templates_collection = None
-    
-    @property
-    def tasks_collection(self) -> Collection:
-        if self._tasks_collection is None:
-            self._tasks_collection = self.db['tasks']
-            self._tasks_collection.create_index('created_at')
-            self._tasks_collection.create_index('status')
-        return self._tasks_collection
-    
-    @property
-    def data_collection(self) -> Collection:
-        if self._data_collection is None:
-            self._data_collection = self.db['crawled_data']
-            self._data_collection.create_index('task_id')
-            self._data_collection.create_index('url')
-        return self._data_collection
-    
-    @property
-    def templates_collection(self) -> Collection:
-        if self._templates_collection is None:
-            self._templates_collection = self.db['templates']
-        return self._templates_collection
-    
+
+class SQLiteStorage:
+    """SQLite 存储 - 轻量级替代方案"""
+
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or DB_PATH
+        self._ensure_db_exists()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """获取数据库连接"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys = ON')
+        return conn
+
+    def _ensure_db_exists(self):
+        """确保数据库和表存在"""
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        conn = self._get_connection()
+        try:
+            # 任务表
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    actions TEXT NOT NULL,
+                    priority INTEGER DEFAULT 1,
+                    status TEXT DEFAULT 'pending',
+                    result TEXT,
+                    error TEXT,
+                    metadata TEXT,
+                    created_at TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    updated_at TEXT
+                )
+            ''')
+
+            # 模板表
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS templates (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    url_pattern TEXT,
+                    actions TEXT NOT NULL,
+                    extractors TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            ''')
+
+            # 爬取数据表
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS crawled_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT,
+                    url TEXT,
+                    data TEXT NOT NULL,
+                    created_at TEXT,
+                    FOREIGN KEY (task_id) REFERENCES tasks(id)
+                )
+            ''')
+
+            conn.commit()
+            logger.info(f"Database initialized: {self.db_path}")
+        finally:
+            conn.close()
+
     def save_task(self, task: Dict[str, Any]) -> str:
-        task['updated_at'] = datetime.now()
-        result = self.tasks_collection.update_one(
-            {'id': task['id']},
-            {'$set': task},
-            upsert=True
-        )
-        return task['id']
-    
+        """保存任务"""
+        conn = self._get_connection()
+        try:
+            task['updated_at'] = datetime.now().isoformat()
+            conn.execute('''
+                INSERT OR REPLACE INTO tasks
+                (id, url, actions, priority, status, result, error, metadata, created_at, started_at, completed_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                task['id'],
+                task['url'],
+                json.dumps(task.get('actions', [])),
+                task.get('priority', 1),
+                task.get('status', 'pending'),
+                json.dumps(task.get('result')) if task.get('result') else None,
+                task.get('error'),
+                json.dumps(task.get('metadata', {})),
+                task.get('created_at') or datetime.now().isoformat(),
+                task.get('started_at'),
+                task.get('completed_at'),
+                task['updated_at']
+            ))
+            conn.commit()
+            return task['id']
+        finally:
+            conn.close()
+
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
-        return self.tasks_collection.find_one({'id': task_id})
-    
+        """获取任务"""
+        conn = self._get_connection()
+        try:
+            row = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+            if row:
+                return dict(row)
+            return None
+        finally:
+            conn.close()
+
     def update_task_status(self, task_id: str, status: str, result: Dict[str, Any] = None):
-        update_data = {
-            'status': status,
-            'updated_at': datetime.now()
-        }
-        if result:
-            update_data['result'] = result
-        if status == 'completed':
-            update_data['completed_at'] = datetime.now()
-        
-        self.tasks_collection.update_one(
-            {'id': task_id},
-            {'$set': update_data}
-        )
-    
+        """更新任务状态"""
+        conn = self._get_connection()
+        try:
+            update_data = {
+                'status': status,
+                'updated_at': datetime.now().isoformat()
+            }
+            if result:
+                update_data['result'] = json.dumps(result)
+            if status == 'completed':
+                update_data['completed_at'] = datetime.now().isoformat()
+
+            set_clause = ', '.join([f'{k} = ?' for k in update_data.keys()])
+            values = list(update_data.values()) + [task_id]
+
+            conn.execute(f'UPDATE tasks SET {set_clause} WHERE id = ?', values)
+            conn.commit()
+        finally:
+            conn.close()
+
     def list_tasks(self, status: str = None, limit: int = 100, skip: int = 0) -> List[Dict[str, Any]]:
-        query = {}
-        if status:
-            query['status'] = status
-        
-        return list(
-            self.tasks_collection.find(query)
-            .sort('created_at', -1)
-            .skip(skip)
-            .limit(limit)
-        )
-    
+        """列出任务"""
+        conn = self._get_connection()
+        try:
+            query = 'SELECT * FROM tasks'
+            params = []
+            if status:
+                query += ' WHERE status = ?'
+                params.append(status)
+            query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+            params.extend([limit, skip])
+
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def delete_task(self, task_id: str) -> bool:
+        """删除任务"""
+        conn = self._get_connection()
+        try:
+            # 先删除关联数据
+            conn.execute('DELETE FROM crawled_data WHERE task_id = ?', (task_id,))
+            result = conn.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+            conn.commit()
+            return result.rowcount > 0
+        finally:
+            conn.close()
+
     def save_crawled_data(self, data: Dict[str, Any]) -> str:
-        data['created_at'] = datetime.now()
-        result = self.data_collection.insert_one(data)
-        return str(result.inserted_id)
-    
+        """保存爬取的数据"""
+        conn = self._get_connection()
+        try:
+            data['created_at'] = datetime.now().isoformat()
+            cursor = conn.execute('''
+                INSERT INTO crawled_data (task_id, url, data, created_at)
+                VALUES (?, ?, ?, ?)
+            ''', (
+                data.get('task_id'),
+                data.get('url'),
+                json.dumps(data.get('data', {})),
+                data['created_at']
+            ))
+            conn.commit()
+            return str(cursor.lastrowid)
+        finally:
+            conn.close()
+
     def get_crawled_data(self, task_id: str) -> List[Dict[str, Any]]:
-        return list(self.data_collection.find({'task_id': task_id}))
-    
+        """获取爬取的数据"""
+        conn = self._get_connection()
+        try:
+            rows = conn.execute(
+                'SELECT * FROM crawled_data WHERE task_id = ? ORDER BY created_at DESC',
+                (task_id,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
     def save_template(self, template: Dict[str, Any]) -> str:
-        template['updated_at'] = datetime.now()
-        self.templates_collection.update_one(
-            {'id': template['id']},
-            {'$set': template},
-            upsert=True
-        )
-        return template['id']
-    
+        """保存模板"""
+        conn = self._get_connection()
+        try:
+            template['updated_at'] = datetime.now().isoformat()
+            conn.execute('''
+                INSERT OR REPLACE INTO templates
+                (id, name, description, url_pattern, actions, extractors, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                template['id'],
+                template['name'],
+                template.get('description', ''),
+                template.get('url_pattern', ''),
+                json.dumps(template.get('actions', [])),
+                json.dumps(template.get('extractors', [])),
+                template.get('created_at') or datetime.now().isoformat(),
+                template['updated_at']
+            ))
+            conn.commit()
+            return template['id']
+        finally:
+            conn.close()
+
     def get_template(self, template_id: str) -> Optional[Dict[str, Any]]:
-        return self.templates_collection.find_one({'id': template_id})
-    
+        """获取模板"""
+        conn = self._get_connection()
+        try:
+            row = conn.execute('SELECT * FROM templates WHERE id = ?', (template_id,)).fetchone()
+            if row:
+                return dict(row)
+            return None
+        finally:
+            conn.close()
+
     def list_templates(self) -> List[Dict[str, Any]]:
-        return list(self.templates_collection.find())
-    
+        """列出所有模板"""
+        conn = self._get_connection()
+        try:
+            rows = conn.execute('SELECT * FROM templates ORDER BY created_at DESC').fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
     def delete_template(self, template_id: str) -> bool:
-        result = self.templates_collection.delete_one({'id': template_id})
-        return result.deleted_count > 0
-    
+        """删除模板"""
+        conn = self._get_connection()
+        try:
+            result = conn.execute('DELETE FROM templates WHERE id = ?', (template_id,))
+            conn.commit()
+            return result.rowcount > 0
+        finally:
+            conn.close()
+
     def get_statistics(self) -> Dict[str, Any]:
-        total_tasks = self.tasks_collection.count_documents({})
-        completed_tasks = self.tasks_collection.count_documents({'status': 'completed'})
-        failed_tasks = self.tasks_collection.count_documents({'status': 'failed'})
-        running_tasks = self.tasks_collection.count_documents({'status': 'running'})
-        
-        total_data = self.data_collection.count_documents({})
-        
-        return {
-            'total_tasks': total_tasks,
-            'completed_tasks': completed_tasks,
-            'failed_tasks': failed_tasks,
-            'running_tasks': running_tasks,
-            'total_data_records': total_data
-        }
-    
-    def close(self):
-        self.client.close()
+        """获取统计信息"""
+        conn = self._get_connection()
+        try:
+            total_tasks = conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+            completed_tasks = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'completed'").fetchone()[0]
+            failed_tasks = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'failed'").fetchone()[0]
+            running_tasks = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'").fetchone()[0]
+            total_data = conn.execute('SELECT COUNT(*) FROM crawled_data').fetchone()[0]
+
+            return {
+                'total_tasks': total_tasks,
+                'completed_tasks': completed_tasks,
+                'failed_tasks': failed_tasks,
+                'running_tasks': running_tasks,
+                'total_data_records': total_data
+            }
+        finally:
+            conn.close()
 
 
-class RedisStorage:
-    """Redis存储 - 用于任务队列和缓存"""
-    
-    def __init__(self, host: str = 'localhost', port: int = 6379, db: int = 0):
-        self.client = redis.Redis(host=host, port=port, db=db, decode_responses=True)
-        self.task_queue = 'task_queue'
-        self.task_prefix = 'task:'
-        self.status_prefix = 'status:'
-    
+class InMemoryQueue:
+    """内存任务队列 - 轻量级替代 Redis"""
+
+    def __init__(self):
+        self._queue: Dict[int, List[str]] = {0: [], 1: [], 2: [], 3: []}  # 按优先级分组
+        self._task_status: Dict[str, str] = {}
+        self._running_tasks: set = set()
+
     def enqueue_task(self, task_id: str, priority: int = 0):
-        self.client.zadd(self.task_queue, {task_id: priority})
+        """入队任务"""
+        priority = max(0, min(3, priority))
+        self._queue[priority].append(task_id)
+        self._task_status[task_id] = 'pending'
         logger.info(f"Task {task_id} enqueued with priority {priority}")
-    
+
     def dequeue_task(self) -> Optional[str]:
-        tasks = self.client.zrange(self.task_queue, 0, 0)
-        if tasks:
-            task_id = tasks[0]
-            self.client.zrem(self.task_queue, task_id)
-            return task_id
+        """出队任务（高优先级优先）"""
+        for priority in [3, 2, 1, 0]:
+            if self._queue[priority]:
+                task_id = self._queue[priority].pop(0)
+                self._task_status[task_id] = 'dequeued'
+                return task_id
         return None
-    
+
     def get_queue_size(self) -> int:
-        return self.client.zcard(self.task_queue)
-    
-    def set_task_status(self, task_id: str, status: str, ttl: int = 86400):
-        key = f"{self.status_prefix}{task_id}"
-        self.client.setex(key, ttl, status)
-    
+        """获取队列大小"""
+        return sum(len(q) for q in self._queue.values())
+
+    def set_task_status(self, task_id: str, status: str):
+        """设置任务状态"""
+        self._task_status[task_id] = status
+
     def get_task_status(self, task_id: str) -> Optional[str]:
-        key = f"{self.status_prefix}{task_id}"
-        return self.client.get(key)
-    
-    def set_task_data(self, task_id: str, data: Dict[str, Any], ttl: int = 86400):
-        key = f"{self.task_prefix}{task_id}"
-        self.client.setex(key, ttl, json.dumps(data))
-    
-    def get_task_data(self, task_id: str) -> Optional[Dict[str, Any]]:
-        key = f"{self.task_prefix}{task_id}"
-        data = self.client.get(key)
-        if data:
-            return json.loads(data)
-        return None
-    
+        """获取任务状态"""
+        return self._task_status.get(task_id)
+
     def add_running_task(self, task_id: str):
-        self.client.sadd('running_tasks', task_id)
-    
+        """添加运行中任务"""
+        self._running_tasks.add(task_id)
+
     def remove_running_task(self, task_id: str):
-        self.client.srem('running_tasks', task_id)
-    
+        """移除运行中任务"""
+        self._running_tasks.discard(task_id)
+
     def get_running_tasks(self) -> List[str]:
-        return list(self.client.smembers('running_tasks'))
-    
-    def close(self):
-        self.client.close()
+        """获取运行中任务列表"""
+        return list(self._running_tasks)
 
 
 class StorageManager:
-    """存储管理器 - 统一管理MongoDB和Redis"""
-    
-    def __init__(self, mongo_uri: str = 'mongodb://localhost:27017', 
-                 mongo_db: str = 'smart_crawler',
-                 redis_host: str = 'localhost',
-                 redis_port: int = 6379):
-        self.mongo = MongoDBStorage(mongo_uri, mongo_db)
-        self.redis = RedisStorage(redis_host, redis_port)
-    
+    """存储管理器 - 统一管理 SQLite 和内存队列"""
+
+    def __init__(self, db_path: str = None):
+        self.db = SQLiteStorage(db_path)
+        self.queue = InMemoryQueue()
+
     def save_task_with_queue(self, task: Dict[str, Any], priority: int = 0):
-        self.mongo.save_task(task)
-        self.redis.enqueue_task(task['id'], priority)
-        self.redis.set_task_status(task['id'], 'pending')
-    
+        """保存任务并入队"""
+        self.db.save_task(task)
+        self.queue.enqueue_task(task['id'], priority)
+        self.queue.set_task_status(task['id'], 'pending')
+
     def get_next_task(self) -> Optional[Dict[str, Any]]:
-        task_id = self.redis.dequeue_task()
+        """获取下一个任务"""
+        task_id = self.queue.dequeue_task()
         if task_id:
-            return self.mongo.get_task(task_id)
+            return self.db.get_task(task_id)
         return None
-    
+
     def update_task_progress(self, task_id: str, status: str, progress: int = 0):
-        self.mongo.update_task_status(task_id, status)
-        self.redis.set_task_status(task_id, status)
+        """更新任务进度"""
+        self.db.update_task_status(task_id, status)
+        self.queue.set_task_status(task_id, status)
         if status == 'running':
-            self.redis.add_running_task(task_id)
+            self.queue.add_running_task(task_id)
         elif status in ['completed', 'failed']:
-            self.redis.remove_running_task(task_id)
-    
+            self.queue.remove_running_task(task_id)
+
     def save_crawled_data_with_task(self, task_id: str, data: Dict[str, Any]):
+        """保存爬取数据"""
         data['task_id'] = task_id
-        self.mongo.save_crawled_data(data)
-    
+        self.db.save_crawled_data(data)
+
     def get_statistics(self) -> Dict[str, Any]:
-        mongo_stats = self.mongo.get_statistics()
-        queue_size = self.redis.get_queue_size()
-        running_tasks = self.redis.get_running_tasks()
-        
+        """获取统计信息"""
+        mongo_stats = self.db.get_statistics()
         return {
             **mongo_stats,
-            'queue_size': queue_size,
-            'running_tasks_count': len(running_tasks)
+            'queue_size': self.queue.get_queue_size(),
+            'running_tasks_count': len(self.queue.get_running_tasks())
         }
-    
+
     def close(self):
-        self.mongo.close()
-        self.redis.close()
+        """关闭连接"""
+        pass  # SQLite 不需要显式关闭
 
 
+# 创建全局存储管理器实例
 storage_manager = StorageManager()

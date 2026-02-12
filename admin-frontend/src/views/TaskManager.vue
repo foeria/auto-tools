@@ -2,108 +2,194 @@
   <div class="task-manager">
     <el-row :gutter="20" class="header">
       <el-col :span="12">
-        <h2>任务管理</h2>
+        <h2>任务与工作流管理</h2>
       </el-col>
       <el-col :span="12" class="actions">
-        <el-input
-          v-model="searchKeyword"
-          placeholder="搜索任务..."
-          style="width: 200px"
-          clearable
-        />
-        <el-select v-model="statusFilter" placeholder="状态筛选" clearable style="width: 140px">
-          <el-option label="全部" value="" />
-          <el-option label="待执行" value="pending" />
-          <el-option label="执行中" value="running" />
-          <el-option label="已完成" value="completed" />
-          <el-option label="失败" value="failed" />
-        </el-select>
-        <el-button type="primary" @click="refreshTasks">
+        <el-button type="primary" @click="goToWorkflowDesigner">
+          <el-icon><Plus /></el-icon>
+          新建工作流
+        </el-button>
+        <el-button @click="refreshTasks">
           <el-icon><Refresh /></el-icon>
           刷新
         </el-button>
       </el-col>
     </el-row>
-    
+
     <el-card shadow="never">
-      <el-table
-        :data="filteredTasks"
-        style="width: 100%"
-        row-key="id"
-        :tree-props="{ children: 'children', hasChildren: 'hasChildren' }"
-        default-expand-all
-        @selection-change="handleSelectionChange"
-      >
-        <el-table-column type="selection" width="50" />
-        <el-table-column prop="id" label="任务ID" width="220" />
-        <el-table-column prop="url" label="目标URL" min-width="200">
-          <template #default="{ row }">
-            <el-tooltip :content="row.url" placement="top">
-              <span class="url-text">{{ row.url }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-        <el-table-column prop="actions_count" label="操作数" width="80" align="center" />
-        <el-table-column prop="status" label="状态" width="100" align="center">
-          <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)">
-              {{ getStatusText(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="created_at" label="创建时间" width="160">
-          <template #default="{ row }">
-            {{ formatDate(row.created_at) }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="completed_at" label="完成时间" width="160">
-          <template #default="{ row }">
-            {{ row.completed_at ? formatDate(row.completed_at) : '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="200" align="center" fixed="right">
-          <template #default="{ row }">
-            <el-button-group>
-              <el-tooltip content="查看详情" placement="top">
-                <el-button size="small" @click="viewTaskDetail(row)">
-                  <el-icon><View /></el-icon>
-                </el-button>
-              </el-tooltip>
-              <el-tooltip content="重新运行" placement="top">
-                <el-button 
-                  size="small" 
-                  type="primary"
-                  :disabled="row.status === 'running'"
-                  @click="reRunTask(row)"
-                >
-                  <el-icon><VideoPlay /></el-icon>
-                </el-button>
-              </el-tooltip>
-              <el-tooltip content="删除" placement="top">
-                <el-button 
-                  size="small" 
-                  type="danger"
-                  @click="deleteTask(row.id)"
-                >
-                  <el-icon><Delete /></el-icon>
-                </el-button>
-              </el-tooltip>
-            </el-button-group>
-          </template>
-        </el-table-column>
-      </el-table>
-      
-      <div class="pagination-wrapper">
-        <el-pagination
-          v-model:current-page="currentPage"
-          v-model:page-size="pageSize"
-          :page-sizes="[10, 20, 50, 100]"
-          :total="totalTasks"
-          layout="total, sizes, prev, pager, next, jumper"
-          @size-change="handleSizeChange"
-          @current-change="handlePageChange"
-        />
-      </div>
+      <el-tabs v-model="activeTab" @tab-change="handleTabChange">
+        <!-- 任务列表标签页 -->
+        <el-tab-pane label="任务列表" name="tasks">
+          <el-row :gutter="20" class="filter-bar">
+            <el-col :span="12">
+              <el-input
+                v-model="searchKeyword"
+                placeholder="搜索任务..."
+                style="width: 200px"
+                clearable
+              />
+            </el-col>
+            <el-col :span="12" style="text-align: right;">
+              <el-select v-model="statusFilter" placeholder="状态筛选" clearable style="width: 140px">
+                <el-option label="全部" value="" />
+                <el-option label="待执行" value="pending" />
+                <el-option label="执行中" value="running" />
+                <el-option label="已完成" value="completed" />
+                <el-option label="失败" value="failed" />
+              </el-select>
+            </el-col>
+          </el-row>
+
+          <el-table
+            :data="filteredTasks"
+            style="width: 100%"
+            row-key="id"
+            :tree-props="{ children: 'children', hasChildren: 'hasChildren' }"
+            default-expand-all
+            @selection-change="handleSelectionChange"
+          >
+            <el-table-column type="selection" width="50" />
+            <el-table-column prop="id" label="任务ID" width="220" />
+            <el-table-column prop="url" label="目标URL" min-width="200">
+              <template #default="{ row }">
+                <el-tooltip :content="row.url" placement="top">
+                  <span class="url-text">{{ row.url }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column prop="actions_count" label="操作数" width="80" align="center" />
+            <el-table-column prop="status" label="状态" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag :type="getStatusType(row.status)">
+                  {{ getStatusText(row.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="created_at" label="创建时间" width="160">
+              <template #default="{ row }">
+                {{ formatDate(row.created_at) }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="completed_at" label="完成时间" width="160">
+              <template #default="{ row }">
+                {{ row.completed_at ? formatDate(row.completed_at) : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="200" align="center" fixed="right">
+              <template #default="{ row }">
+                <el-button-group>
+                  <el-tooltip content="查看详情" placement="top">
+                    <el-button size="small" @click="viewTaskDetail(row)">
+                      <el-icon><View /></el-icon>
+                    </el-button>
+                  </el-tooltip>
+                  <el-tooltip content="重新运行" placement="top">
+                    <el-button
+                      size="small"
+                      type="primary"
+                      :disabled="row.status === 'running'"
+                      @click="reRunTask(row)"
+                    >
+                      <el-icon><VideoPlay /></el-icon>
+                    </el-button>
+                  </el-tooltip>
+                  <el-tooltip content="删除" placement="top">
+                    <el-button
+                      size="small"
+                      type="danger"
+                      @click="deleteTask(row.id)"
+                    >
+                      <el-icon><Delete /></el-icon>
+                    </el-button>
+                  </el-tooltip>
+                </el-button-group>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pagination-wrapper">
+            <el-pagination
+              v-model:current-page="currentPage"
+              v-model:page-size="pageSize"
+              :page-sizes="[10, 20, 50, 100]"
+              :total="totalTasks"
+              layout="total, sizes, prev, pager, next, jumper"
+              @size-change="handleSizeChange"
+              @current-change="handlePageChange"
+            />
+          </div>
+        </el-tab-pane>
+
+        <!-- 工作流管理标签页 -->
+        <el-tab-pane label="工作流管理" name="workflows">
+          <el-row :gutter="20" class="filter-bar">
+            <el-col :span="12">
+              <span class="workflow-count">已保存工作流: {{ savedWorkflows.length }} 个</span>
+            </el-col>
+            <el-col :span="12" style="text-align: right;">
+              <el-button size="small" @click="loadSavedWorkflows">
+                <el-icon><Refresh /></el-icon>
+                刷新列表
+              </el-button>
+            </el-col>
+          </el-row>
+
+          <el-table
+            :data="savedWorkflows"
+            style="width: 100%"
+            v-if="savedWorkflows.length > 0"
+          >
+            <el-table-column prop="name" label="工作流名称" min-width="180">
+              <template #default="{ row }">
+                <div class="workflow-name">
+                  <el-icon size="18"><Operation /></el-icon>
+                  <span>{{ row.name }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="nodes" label="节点数" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag size="small">{{ row.nodes?.length || 0 }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="创建时间" width="160">
+              <template #default="{ row }">
+                {{ formatDate(row.created_at) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="220" align="center">
+              <template #default="{ row }">
+                <el-button-group>
+                  <el-tooltip content="编辑工作流" placement="top">
+                    <el-button size="small" type="primary" @click="editWorkflow(row)">
+                      <el-icon><Edit /></el-icon>
+                    </el-button>
+                  </el-tooltip>
+                  <el-tooltip content="运行工作流" placement="top">
+                    <el-button size="small" type="success" @click="runWorkflow(row)">
+                      <el-icon><VideoPlay /></el-icon>
+                    </el-button>
+                  </el-tooltip>
+                  <el-tooltip content="导出JSON" placement="top">
+                    <el-button size="small" @click="exportWorkflow(row)">
+                      <el-icon><Download /></el-icon>
+                    </el-button>
+                  </el-tooltip>
+                  <el-tooltip content="删除" placement="top">
+                    <el-button size="small" type="danger" @click="deleteSavedWorkflow(row.id)">
+                      <el-icon><Delete /></el-icon>
+                    </el-button>
+                  </el-tooltip>
+                </el-button-group>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <el-empty v-else description="暂无已保存的工作流">
+            <el-button type="primary" @click="goToWorkflowDesigner">创建第一个工作流</el-button>
+          </el-empty>
+        </el-tab-pane>
+      </el-tabs>
     </el-card>
     
     <el-dialog
@@ -178,9 +264,10 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, View, VideoPlay, Delete } from '@element-plus/icons-vue'
-import axios from 'axios'
+import { Refresh, View, VideoPlay, Delete, Plus, Edit, Download, Operation } from '@element-plus/icons-vue'
+import { taskApi } from '@/services/api'
 
 interface Task {
   id: string
@@ -194,6 +281,7 @@ interface Task {
   completed_at?: string
 }
 
+const router = useRouter()
 const tasks = ref<Task[]>([])
 const searchKeyword = ref('')
 const statusFilter = ref('')
@@ -203,6 +291,19 @@ const totalTasks = ref(0)
 const selectedTasks = ref<Task[]>([])
 const detailDialogVisible = ref(false)
 const currentTask = ref<Task | null>(null)
+const activeTab = ref('tasks')
+
+// 工作流相关
+const savedWorkflows = ref<any[]>([])
+
+interface WorkflowData {
+  id: string
+  name: string
+  nodes: any[]
+  edges: any[]
+  actions: any[]
+  created_at: string
+}
 
 const filteredTasks = computed(() => {
   return tasks.value.filter(task => {
@@ -241,17 +342,12 @@ function formatDate(dateStr: string): string {
 
 async function fetchTasks() {
   try {
-    const params = new URLSearchParams()
-    if (statusFilter.value) params.append('status', statusFilter.value)
-    params.append('limit', '100')
-    params.append('offset', '0')
-    
-    const response = await axios.get(`http://localhost:8000/api/tasks?${params.toString()}`)
-    tasks.value = response.data.tasks.map((task: any) => ({
+    const response = await taskApi.list(statusFilter.value || undefined, 100, 0)
+    tasks.value = response.tasks.map((task: any) => ({
       ...task,
       actions_count: task.actions?.length || 0
     }))
-    totalTasks.value = response.data.total
+    totalTasks.value = response.total
   } catch (error) {
     console.error('获取任务列表失败:', error)
     tasks.value = generateMockTasks()
@@ -346,12 +442,12 @@ async function reRunTask(task: Task) {
       confirmButtonText: '确定',
       cancelButtonText: '取消'
     })
-    
+
     ElMessage.info('正在重新提交任务...')
-    
-    const response = await axios.post(`http://localhost:8000/api/tasks/${task.id}/retry`)
-    
-    ElMessage.success(`任务已重新提交，新任务ID: ${response.data.task_id}`)
+
+    const response = await taskApi.retry(task.id)
+
+    ElMessage.success(`任务已重新提交，新任务ID: ${response.task_id}`)
     await fetchTasks()
     detailDialogVisible.value = false
   } catch (error: any) {
@@ -371,8 +467,8 @@ async function deleteTask(taskId: string) {
       cancelButtonText: '取消',
       type: 'warning'
     })
-    
-    await axios.delete(`http://localhost:8000/api/tasks/${taskId}`)
+
+    await taskApi.delete(taskId)
     tasks.value = tasks.value.filter(t => t.id !== taskId)
     totalTasks.value = tasks.value.length
     ElMessage.success('任务已删除')
@@ -386,6 +482,110 @@ async function deleteTask(taskId: string) {
   }
 }
 
+// ========== 工作流管理相关函数 ==========
+
+function handleTabChange(tab: string) {
+  if (tab === 'workflows') {
+    loadSavedWorkflows()
+  }
+}
+
+function loadSavedWorkflows() {
+  savedWorkflows.value = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key?.startsWith('workflow_')) {
+      try {
+        const data = JSON.parse(localStorage.getItem(key) || '{}')
+        savedWorkflows.value.push(data)
+      } catch (e) {
+        console.error('解析工作流数据失败:', e)
+      }
+    }
+  }
+  // 按创建时间倒序排列
+  savedWorkflows.value.sort((a, b) => {
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  })
+}
+
+function editWorkflow(workflow: WorkflowData) {
+  // 跳转到工作流设计器并加载该工作流
+  router.push({
+    path: '/workflow',
+    query: { workflowId: workflow.id }
+  })
+}
+
+function runWorkflow(workflow: WorkflowData) {
+  // 将工作流转换为任务并执行
+  const taskData = {
+    url: workflow.actions.find((a: any) => a.type === 'goto')?.url || '',
+    actions: workflow.actions,
+    workflow_name: workflow.name
+  }
+
+  ElMessageBox.confirm(
+    `确定要运行工作流 "${workflow.name}" 吗？\n目标URL: ${taskData.url}\n操作数: ${workflow.actions.length}`,
+    '确认运行',
+    {
+      confirmButtonText: '确定运行',
+      cancelButtonText: '取消',
+      type: 'info'
+    }
+  ).then(async () => {
+    try {
+      const response = await taskApi.create(taskData)
+      ElMessage.success(`任务已创建，ID: ${response.task_id}`)
+      activeTab.value = 'tasks'
+      fetchTasks()
+    } catch (error: any) {
+      console.error('创建任务失败:', error)
+      ElMessage.error(error.response?.data?.detail || '创建任务失败')
+    }
+  }).catch(() => {
+    ElMessage.info('取消运行')
+  })
+}
+
+function exportWorkflow(workflow: WorkflowData) {
+  const dataStr = JSON.stringify(workflow, null, 2)
+  const blob = new Blob([dataStr], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${workflow.name}.json`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  ElMessage.success('工作流已导出')
+}
+
+function deleteSavedWorkflow(workflowId: string) {
+  ElMessageBox.confirm(
+    '确定要删除该工作流吗？此操作不可恢复。',
+    '警告',
+    {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    }
+  ).then(() => {
+    localStorage.removeItem(`workflow_${workflowId}`)
+    savedWorkflows.value = savedWorkflows.value.filter(w => w.id !== workflowId)
+    ElMessage.success('工作流已删除')
+  }).catch(() => {
+    ElMessage.info('取消删除')
+  })
+}
+
+function goToWorkflowDesigner() {
+  router.push('/workflow')
+}
+
+// ========== 任务管理相关函数 ==========
+
 onMounted(() => {
   fetchTasks()
 })
@@ -395,20 +595,24 @@ onMounted(() => {
 .task-manager {
   .header {
     margin-bottom: 20px;
-    
+
     h2 {
       margin: 0;
       font-size: 20px;
       color: #303133;
     }
-    
+
     .actions {
       display: flex;
       gap: 12px;
       justify-content: flex-end;
     }
   }
-  
+
+  .filter-bar {
+    margin-bottom: 16px;
+  }
+
   .url-text {
     display: inline-block;
     max-width: 300px;
@@ -417,7 +621,19 @@ onMounted(() => {
     white-space: nowrap;
     vertical-align: bottom;
   }
-  
+
+  .workflow-count {
+    font-size: 14px;
+    color: #606266;
+    line-height: 32px;
+  }
+
+  .workflow-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .pagination-wrapper {
     display: flex;
     justify-content: flex-end;

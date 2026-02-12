@@ -18,7 +18,6 @@ const props = defineProps({
 
 const emit = defineEmits(['update:node', 'delete', 'duplicate'])
 
-// @ts-expect-error - Used in template
 const getCategoryName = (category: string): string => {
   const names: Record<string, string> = {
     browser: '浏览器',
@@ -31,7 +30,6 @@ const getCategoryName = (category: string): string => {
   return names[category] || category
 }
 
-// @ts-expect-error - Used in template
 function copyNodeId() {
   if (props.node) {
     navigator.clipboard.writeText(props.node.id)
@@ -39,7 +37,6 @@ function copyNodeId() {
   }
 }
 
-// @ts-expect-error - Used in template
 function addCondition() {
   if (props.node) {
     if (!props.node.config.conditions) {
@@ -53,14 +50,12 @@ function addCondition() {
   }
 }
 
-// @ts-expect-error - Used in template
 function removeCondition(index: number) {
   if (props.node && props.node.config.conditions) {
     props.node.config.conditions.splice(index, 1)
   }
 }
 
-// @ts-expect-error - Used in template
 function addSelector() {
   if (props.node) {
     if (!props.node.config.selectors) {
@@ -70,7 +65,7 @@ function addSelector() {
   }
 }
 
-// @ts-expect-error - Used in template
+
 function removeSelector(index: number) {
   if (props.node && props.node.config.selectors) {
     props.node.config.selectors.splice(index, 1)
@@ -94,7 +89,7 @@ function removeSelector(index: number) {
       </el-form-item>
       
       <el-form-item label="类型">
-        <el-tag>{{ getCategoryName(node.category) }}</el-tag>
+        <el-tag>{{ getCategoryName(node.category || 'unknown') }}</el-tag>
       </el-form-item>
       
       <el-form-item label="描述">
@@ -147,7 +142,7 @@ function removeSelector(index: number) {
         </el-form-item>
         <el-form-item label="图像识别">
           <el-switch v-model="node.config.byImage" />
-        </template>
+        </el-form-item>
         <template v-if="node.config.byImage">
           <el-form-item label="模板图">
             <el-input v-model="node.config.templatePath" placeholder="button.png" />
@@ -286,7 +281,7 @@ function removeSelector(index: number) {
             <el-col :span="6">
               <el-input-number v-model="node.config.regionHeight" :min="0" placeholder="高" style="width: 100%" />
             </el-col>
-          </el-input>
+          </el-row>
         </el-form-item>
         <el-form-item label="语言">
           <el-select v-model="node.config.languages" multiple style="width: 100%">
@@ -380,7 +375,7 @@ function removeSelector(index: number) {
               <el-col :span="12">
                 <el-input-number v-model="node.config.targetY" :min="0" placeholder="Y" style="width: 100%" />
               </el-col>
-            </el-input>
+            </el-row>
           </el-form-item>
         </template>
       </template>
@@ -545,7 +540,7 @@ function removeSelector(index: number) {
             <el-option label="关闭最后一个标签页" value="last" />
             <el-option label="关闭除当前外所有" value="others" />
           </el-select>
-        </template>
+        </el-form-item>
       </template>
       
       <template v-else-if="node.type === 'switch_frame'">
@@ -582,13 +577,13 @@ function removeSelector(index: number) {
       
       <template v-else-if="node.type === 'upload'">
         <el-form-item label="选择器">
-          <el-input v-model="node!.config.selector" placeholder="input[type=file]" />
+          <el-input v-model="node.config.selector" placeholder="input[type=file]" />
         </el-form-item>
         <el-form-item label="文件路径">
-          <el-input v-model="node!.config.filePaths" type="textarea" :rows="3" placeholder="每行一个文件路径" />
+          <el-input v-model="node.config.filePaths" type="textarea" :rows="3" placeholder="每行一个文件路径" />
         </el-form-item>
         <el-form-item label="多个文件">
-          <el-switch v-model="node!.config.multiple" />
+          <el-switch v-model="node.config.multiple" />
         </el-form-item>
       </template>
     </el-form>

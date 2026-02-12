@@ -15,6 +15,24 @@
       </div>
     </div>
 
+    <!-- 实时截图预览 -->
+    <div class="screenshot-section" v-if="currentScreenshot">
+      <div class="screenshot-header">
+        <el-icon><Picture /></el-icon>
+        <span>实时画面</span>
+        <el-tag size="small" type="info" style="margin-left: auto">
+          操作 {{ currentActionIndex }} / {{ totalActions }}
+        </el-tag>
+      </div>
+      <div class="screenshot-container">
+        <img :src="currentScreenshot" alt="实时执行画面" class="screenshot-preview" />
+        <div class="screenshot-overlay" v-if="isRunning">
+          <el-icon class="live-indicator"><VideoPlay /></el-icon>
+          <span>实时预览</span>
+        </div>
+      </div>
+    </div>
+
     <div class="task-info" v-if="currentTask">
       <div class="task-id">
         <span class="label">任务ID:</span>
@@ -62,7 +80,7 @@
       </div>
     </div>
 
-    <div class="progress-section" v-if="currentTask && currentTask.status !== 'completed' && currentTask.status !== 'failed'">
+    <div class="progress-section" v-if="currentTask && !['completed', 'failed', 'cancelled', 'cancelling'].includes(currentTask.status)">
       <div class="progress-info">
         <span class="progress-label">{{ currentTask.currentAction || '准备中...' }}</span>
         <span class="progress-percentage">{{ currentTask.progress }}%</span>
@@ -218,14 +236,14 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { 
-  Monitor, Refresh, CopyDocument, Operation, Clock, List, 
+import {
+  Monitor, Refresh, CopyDocument, Operation, Clock, List,
   CircleCheck, Loading, Document, Download, Delete,
   InfoFilled, Close, View, WarningFilled, SuccessFilled, CircleClose, Remove,
-  Search, DataAnalysis
+  Search, DataAnalysis, Picture, VideoPlay
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useWebSocket, type TaskStatusPayload, type TaskProgressPayload, type TaskLogPayload } from '@/services/websocket'
+import { useWebSocket, type TaskStatusPayload, type TaskProgressPayload, type TaskLogPayload, type TaskScreenshotPayload } from '@/services/websocket'
 import { taskApi } from '@/services/api'
 
 interface ActionInfo {
@@ -264,13 +282,18 @@ const emit = defineEmits<{
   (e: 'cancel'): void
 }>()
 
-const { connected, connect, disconnect, onTaskStatus, onTaskProgress, onTaskLog, onTaskResult, onTaskError, subscribe } = useWebSocket()
+const { connected, connect, disconnect, onTaskStatus, onTaskProgress, onTaskLog, onTaskResult, onTaskError, onTaskScreenshot, subscribe } = useWebSocket()
 
 const currentTask = ref<TaskInfo | null>(null)
 const logs = ref<LogEntry[]>([])
 const startTime = ref<Date | null>(null)
 const refreshing = ref(false)
 const logsContainerRef = ref<HTMLElement | null>(null)
+
+// 截图相关状态
+const currentScreenshot = ref<string | null>(null)
+const currentActionIndex = ref(0)
+const screenshotTimestamps = ref<string[]>([])
 
 const connectionStatusType = computed(() => connected.value ? 'success' : 'danger')
 const connectionStatusText = computed(() => connected.value ? '已连接' : '未连接')
@@ -280,7 +303,7 @@ const statusType = computed(() => {
   if (status === 'running') return 'primary'
   if (status === 'completed') return 'success'
   if (status === 'failed') return 'danger'
-  if (status === 'cancelled') return 'info'
+  if (status === 'cancelled' || status === 'cancelling') return 'info'
   return 'warning'
 })
 
@@ -291,6 +314,7 @@ const statusText = computed(() => {
     queued: '排队中',
     running: '执行中',
     starting: '启动中',
+    cancelling: '取消中',
     completed: '已完成',
     failed: '失败',
     cancelled: '已取消'
@@ -300,7 +324,7 @@ const statusText = computed(() => {
 
 const statusIcon = computed(() => {
   const status = currentTask.value?.status
-  if (status === 'running' || status === 'starting') return Loading
+  if (status === 'running' || status === 'starting' || status === 'cancelling') return Loading
   if (status === 'completed') return SuccessFilled
   if (status === 'failed') return CircleClose
   return WarningFilled
@@ -315,7 +339,16 @@ const progressStatus = computed(() => {
 
 const canCancel = computed(() => {
   const status = currentTask.value?.status
-  return status === 'running' || status === 'starting' || status === 'pending' || status === 'queued'
+  return status === 'running' || status === 'starting' || status === 'pending' || status === 'queued' || status === 'cancelling'
+})
+
+const isRunning = computed(() => {
+  const status = currentTask.value?.status
+  return status === 'running' || status === 'starting' || status === 'pending'
+})
+
+const totalActions = computed(() => {
+  return currentTask.value?.totalActions || screenshotTimestamps.value.length || 0
 })
 
 const displayedActions = computed<ActionInfo[]>(() => {
@@ -378,6 +411,7 @@ let unsubscribeProgress: (() => void) | null = null
 let unsubscribeLog: (() => void) | null = null
 let unsubscribeResult: (() => void) | null = null
 let unsubscribeError: (() => void) | null = null
+let unsubscribeScreenshot: (() => void) | null = null
 
 function getActionNames(count: number): ActionInfo[] {
   const names: Record<string, string> = {
@@ -488,7 +522,23 @@ async function handleCancel() {
       type: 'warning'
     })
 
+    // 立即更新本地状态为取消中
+    currentTask.value.status = 'cancelling'
+    currentTask.value.currentAction = '正在取消...'
+
+    // 发送取消请求
     await taskApi.cancel(currentTask.value.taskId)
+
+    // 等待一小段时间让WebSocket消息更新状态
+    await new Promise(resolve => setTimeout(resolve, 500))
+
+    // 如果状态还没更新，手动更新
+    if (currentTask.value.status === 'cancelling') {
+      currentTask.value.status = 'cancelled'
+      currentTask.value.progress = 0
+      currentTask.value.currentAction = '任务已取消'
+    }
+
     emit('cancel')
     ElMessage.success('任务已取消')
   } catch {
@@ -595,6 +645,16 @@ function handleError(error: unknown) {
   emit('error', String(error))
 }
 
+function handleScreenshot(screenshot: TaskScreenshotPayload) {
+  if (screenshot.screenshot) {
+    currentScreenshot.value = `data:image/jpeg;base64,${screenshot.screenshot}`
+    currentActionIndex.value = screenshot.action_index
+    if (screenshotTimestamps.value.length < 50) {
+      screenshotTimestamps.value.push(screenshot.timestamp)
+    }
+  }
+}
+
 function initializeWebSocket() {
   if (props.autoConnect) {
     connect()
@@ -619,6 +679,7 @@ function initializeWebSocket() {
   unsubscribeLog = onTaskLog(addLog)
   unsubscribeResult = onTaskResult(handleResult)
   unsubscribeError = onTaskError(handleError)
+  unsubscribeScreenshot = onTaskScreenshot(handleScreenshot)
 }
 
 onMounted(() => {
@@ -631,6 +692,7 @@ onUnmounted(() => {
   unsubscribeLog?.()
   unsubscribeResult?.()
   unsubscribeError?.()
+  unsubscribeScreenshot?.()
 })
 
 defineExpose({
@@ -1061,5 +1123,61 @@ defineExpose({
   padding: 12px 16px;
   border-top: 1px solid var(--el-border-color-lighter);
   background: var(--el-fill-color-light);
+}
+
+.screenshot-section {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-light);
+
+  .screenshot-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+  }
+
+  .screenshot-container {
+    position: relative;
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 200px;
+    max-height: 300px;
+    overflow: hidden;
+
+    .screenshot-preview {
+      max-width: 100%;
+      max-height: 280px;
+      object-fit: contain;
+    }
+
+    .screenshot-overlay {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      background: rgba(0, 0, 0, 0.6);
+      border-radius: 4px;
+      color: #fff;
+      font-size: 12px;
+
+      .live-indicator {
+        color: #67c23a;
+        animation: pulse 1.5s ease-in-out infinite;
+      }
+    }
+  }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 </style>

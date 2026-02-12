@@ -32,12 +32,13 @@ class TaskStatus(str, Enum):
 
 class Task:
     """任务类"""
-    
-    def __init__(self, task_id: str, url: str, actions: List[Dict[str, Any]], 
+
+    def __init__(self, task_id: str, url: str, actions: List[Dict[str, Any]],
                  priority: TaskPriority = TaskPriority.NORMAL,
                  max_retries: int = 3,
                  callback: Callable = None,
-                 error_callback: Callable = None):
+                 error_callback: Callable = None,
+                 metadata: Dict[str, Any] = None):
         self.id = task_id
         self.url = url
         self.actions = actions
@@ -52,7 +53,7 @@ class Task:
         self.completed_at = None
         self.callback = callback
         self.error_callback = error_callback
-        self.metadata = {}
+        self.metadata = metadata or {}
     
     def to_dict(self) -> Dict[str, Any]:
         return {

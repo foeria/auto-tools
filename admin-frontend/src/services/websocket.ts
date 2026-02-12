@@ -43,6 +43,13 @@ export interface TaskErrorPayload {
   details: Record<string, unknown>
 }
 
+export interface TaskScreenshotPayload {
+  task_id: string
+  screenshot: string  // base64 encoded image
+  action_index: number
+  timestamp: string
+}
+
 class WebSocketService {
   private ws: WebSocket | null = null
   private url: string = ''
@@ -187,6 +194,10 @@ class WebSocketService {
     return this.on<TaskErrorPayload>('task_error', handler)
   }
 
+  onTaskScreenshot(handler: (data: TaskScreenshotPayload) => void): () => void {
+    return this.on<TaskScreenshotPayload>('task_screenshot', handler)
+  }
+
   private dispatchMessage(message: WebSocketMessage): void {
     const handlers = this.messageHandlers.get(message.type)
     if (handlers) {
@@ -245,6 +256,7 @@ export function useWebSocket() {
     onTaskProgress: wsService.onTaskProgress.bind(wsService),
     onTaskLog: wsService.onTaskLog.bind(wsService),
     onTaskResult: wsService.onTaskResult.bind(wsService),
-    onTaskError: wsService.onTaskError.bind(wsService)
+    onTaskError: wsService.onTaskError.bind(wsService),
+    onTaskScreenshot: wsService.onTaskScreenshot.bind(wsService)
   }
 }

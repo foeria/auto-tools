@@ -122,31 +122,31 @@ smart-crawler/
 
 ## 支持的动作类型
 
-| 动作 | 说明 | 主要参数 |
-|------|------|----------|
-| goto | 访问页面 | url, wait_until |
-| click | 点击元素 | selector, by_image, timeout |
-| input | 输入内容 | selector, value, clear, press_enter |
-| wait | 等待 | timeout, selector, state |
-| screenshot | 截图 | selector, full_page, path |
-| extract | 提取数据 | selectors, extract_type, attribute |
-| evaluate | 执行脚本 | script, arg |
-| scroll | 滚动 | x, y, selector |
-| press | 按键 | selector, key |
-| hover | 悬停 | selector, timeout |
-| upload | 上传文件 | selector, file_paths |
+| 动作       | 说明     | 主要参数                            |
+| ---------- | -------- | ----------------------------------- |
+| goto       | 访问页面 | url, wait_until                     |
+| click      | 点击元素 | selector, by_image, timeout         |
+| input      | 输入内容 | selector, value, clear, press_enter |
+| wait       | 等待     | timeout, selector, state            |
+| screenshot | 截图     | selector, full_page, path           |
+| extract    | 提取数据 | selectors, extract_type, attribute  |
+| evaluate   | 执行脚本 | script, arg                         |
+| scroll     | 滚动     | x, y, selector                      |
+| press      | 按键     | selector, key                       |
+| hover      | 悬停     | selector, timeout                   |
+| upload     | 上传文件 | selector, file_paths                |
 
 ## 数据提取器
 
-| 提取器 | 说明 |
-|--------|------|
-| html | HTML元素提取 |
-| json | JSON数据提取 |
-| table | 表格数据提取 |
-| xpath | XPath提取 |
-| api | API响应捕获 |
-| screenshot | 页面截图 |
-| fullpage | 完整页面文本 |
+| 提取器     | 说明         |
+| ---------- | ------------ |
+| html       | HTML元素提取 |
+| json       | JSON数据提取 |
+| table      | 表格数据提取 |
+| xpath      | XPath提取    |
+| api        | API响应捕获  |
+| screenshot | 页面截图     |
+| fullpage   | 完整页面文本 |
 
 ## 配置说明
 

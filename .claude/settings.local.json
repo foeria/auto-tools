@@ -2,7 +2,29 @@
   "permissions": {
     "allow": [
       "Bash(.venvScriptspython.exe:*)",
-      "Bash(\"/c/Users/86198/Desktop/auto-tools/.venv/Scripts/python.exe\" -c \"import sys; sys.path.insert\\(0, ''/c/Users/86198/Desktop/auto-tools''\\); from scrapy_project.utils.scheduler import TaskPriority, TaskStatus, Task; print\\(''Import successful!''\\)\")"
+      "Bash(\"/c/Users/86198/Desktop/auto-tools/.venv/Scripts/python.exe\" -c \"import sys; sys.path.insert\\(0, ''/c/Users/86198/Desktop/auto-tools''\\); from scrapy_project.utils.scheduler import TaskPriority, TaskStatus, Task; print\\(''Import successful!''\\)\")",
+      "Bash(npx vue-tsc:*)",
+      "Bash(python -c:*)",
+      "Bash(python:*)",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "mcp__chrome-devtools__navigate_page",
+      "mcp__chrome-devtools__take_snapshot",
+      "Bash(curl:*)",
+      "mcp__chrome-devtools__list_console_messages",
+      "mcp__chrome-devtools__list_network_requests",
+      "mcp__chrome-devtools__evaluate_script",
+      "mcp__chrome-devtools__list_pages",
+      "mcp__chrome-devtools__get_network_request",
+      "mcp__chrome-devtools__take_screenshot",
+      "mcp__chrome-devtools__wait_for",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(tasklist)",
+      "mcp__chrome-devtools__click",
+      "Bash(taskkill:*)",
+      "Bash(pip install:*)",
+      "Bash(pip show:*)"
     ]
   }
 }

@@ -20,6 +20,7 @@ class WebSocketMessageType(str, Enum):
     TASK_LOG = "task_log"
     TASK_RESULT = "task_result"
     TASK_ERROR = "task_error"
+    TASK_SCREENSHOT = "task_screenshot"  # 实时截图
     CONNECT = "connect"
     DISCONNECT = "disconnect"
     SUBSCRIBE = "subscribe"
@@ -57,8 +58,12 @@ class ConnectionManager:
         self.global_connections: Set[WebSocket] = set()
     
     async def connect(self, websocket: WebSocket, task_id: str = None):
-        await websocket.accept()
-        
+        try:
+            await websocket.accept()
+        except RuntimeError as e:
+            logger.warning(f"WebSocket already connected or closed: {e}")
+            return
+
         if task_id:
             if task_id not in self.active_connections:
                 self.active_connections[task_id] = set()
@@ -78,9 +83,12 @@ class ConnectionManager:
     
     async def send_message(self, websocket: WebSocket, message: WebSocketMessage):
         try:
+            # 检查连接是否仍然有效
+            if websocket.client.state != 2:  # WebSocketState.CONNECTED
+                return
             await websocket.send_text(message.to_json())
         except Exception as e:
-            logger.error(f"Failed to send message: {e}")
+            logger.debug(f"Failed to send message (connection may be closed): {e}")
     
     async def broadcast(self, message: WebSocketMessage, task_id: str = None):
         connections = set()
@@ -202,6 +210,24 @@ class ConnectionManager:
             task_id
         )
     
+    async def send_task_screenshot(self, task_id: str, screenshot_data: str, action_index: int = 0):
+        """发送实时截图"""
+        payload = {
+            "task_id": task_id,
+            "screenshot": screenshot_data,  # base64编码的图片数据
+            "action_index": action_index,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        await self.broadcast(
+            WebSocketMessage(
+                type=WebSocketMessageType.TASK_SCREENSHOT,
+                payload=payload,
+                task_id=task_id
+            ),
+            task_id
+        )
+
     def get_connection_count(self, task_id: str = None) -> int:
         if task_id and task_id in self.active_connections:
             return len(self.active_connections[task_id])
