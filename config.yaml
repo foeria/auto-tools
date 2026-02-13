@@ -1,0 +1,105 @@
+# 自动化任务系统配置文件
+# 修改配置后需重启服务生效
+
+# 浏览器配置
+browser:
+  # 本地Chrome浏览器路径 (Windows路径使用双反斜杠或正斜杠)
+  chrome_path: "E:\\chrome-win64\\chrome.exe"
+  # Chrome调试端口范围 (随机选择)
+  debug_port_min: 9222
+  debug_port_max: 9299
+  # 是否默认无头模式
+  headless: false
+  # 页面加载超时时间 (毫秒)
+  page_timeout: 30000
+  # 操作超时时间 (毫秒)
+  action_timeout: 5000
+  # 截图质量 (1-100)
+  screenshot_quality: 70
+  # 截图最大宽度 (像素，超过则缩放)
+  screenshot_max_width: 1920
+  # 启动超时时间 (秒)
+  start_timeout: 10
+
+# 任务配置
+task:
+  # 最大重试次数
+  max_retries: 3
+  # 重试间隔 (毫秒)
+  retry_delay: 1000
+  # 浏览器清理超时 (秒)
+  cleanup_timeout: 5
+
+# WebSocket配置
+websocket:
+  # 心跳间隔 (毫秒)
+  ping_interval: 30000
+  # Pong超时时间 (毫秒)
+  pong_timeout: 10000
+  # 最大重连次数
+  max_reconnect_attempts: 5
+  # 重连延迟基数 (毫秒)
+  reconnect_delay_base: 3000
+  # 启用消息压缩
+  enable_compression: true
+
+# 存储配置
+storage:
+  # 数据库路径
+  db_path: "./scrapy_project/data/storage.db"
+  # 数据目录
+  data_dir: "./scrapy_project/data"
+  # 最大历史记录数
+  max_history: 1000
+  # 任务历史保留天数
+  history_retention_days: 30
+
+# 日志配置
+logging:
+  # 日志级别: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  # 控制台输出
+  console: true
+  # 日志文件路径
+  file_path: "./logs/app.log"
+  # 日志文件大小上限 (字节)
+  max_file_size: 10485760
+  # 保留的日志文件数
+  backup_count: 5
+
+# API服务配置
+api:
+  # 服务主机
+  host: "0.0.0.0"
+  # 服务端口
+  port: 8000
+  # 跨域允许的来源
+  cors_origins:
+    - "*"
+  # 是否启用详细错误信息
+  debug: false
+
+# 模拟模式配置 (当真实浏览器不可用时)
+simulation:
+  # 是否启用模拟模式
+  enabled: true
+  # 操作延迟 (秒)
+  action_delay: 0.3
+  # 浏览器启动延迟 (秒)
+  browser_start_delay: 0.5
+  # 浏览器关闭延迟 (秒)
+  browser_close_delay: 0.2
+
+# 性能优化配置
+performance:
+  # 是否启用日志批量发送
+  batch_log_enabled: true
+  # 日志批量发送间隔 (毫秒)
+  batch_log_interval: 100
+  # 日志批量大小
+  batch_log_size: 10
+  # 禁用实时截图 (减少带宽)
+  disable_realtime_screenshot: false
+  # 截图间隔 (操作数，每N次操作发送一次截图)
+  screenshot_interval: 1
+

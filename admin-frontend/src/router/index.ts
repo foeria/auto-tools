@@ -18,6 +18,12 @@ const routes = [
     meta: { title: '任务管理' }
   },
   {
+    path: '/history',
+    name: 'History',
+    component: () => import('@/views/TaskHistory.vue'),
+    meta: { title: '任务历史' }
+  },
+  {
     path: '/templates',
     name: 'Templates',
     component: () => import('@/views/SpiderTemplates.vue'),

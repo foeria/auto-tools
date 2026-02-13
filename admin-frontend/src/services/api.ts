@@ -102,6 +102,32 @@ export interface Statistics {
   total_data_records: number
 }
 
+export interface TaskHistoryItem {
+  id: string
+  url: string
+  actions: any[]
+  actions_count: number
+  status: string
+  result?: any
+  error?: string
+  created_at: string
+  started_at?: string
+  completed_at?: string
+  duration?: number
+  success_count?: number
+  failed_count?: number
+  avg_step_duration?: number
+}
+
+export interface HistoryStatistics {
+  total_tasks: number
+  completed_tasks: number
+  failed_tasks: number
+  cancelled_tasks: number
+  success_rate: number
+  avg_duration: number
+}
+
 export const taskApi = {
   async create(taskData: TaskCreate): Promise<{ task_id: string; status: string; message: string }> {
     const response = await api.post('/api/tasks', taskData)
@@ -134,6 +160,47 @@ export const taskApi = {
 
   async cancel(taskId: string): Promise<void> {
     await api.delete(`/api/tasks/${taskId}`)
+  },
+
+  // 批量操作
+  async createBatch(
+    tasks: TaskCreate[],
+    maxRetries?: number
+  ): Promise<{
+    created: Array<{ task_id: string; url: string; status: string }>
+    errors: Array<{ index: number; error: string }>
+    total_created: number
+    total_errors: number
+  }> {
+    const response = await api.post('/api/tasks/batch', {
+      tasks,
+      max_retries: maxRetries
+    })
+    return response.data
+  },
+
+  async deleteBatch(taskIds: string[]): Promise<{
+    deleted: string[]
+    errors: Array<{ task_id: string; error: string }>
+    total_deleted: number
+    total_errors: number
+  }> {
+    const response = await api.delete('/api/tasks/batch', {
+      data: { task_ids: taskIds }
+    })
+    return response.data
+  },
+
+  async cancelBatch(taskIds: string[]): Promise<{
+    cancelled: string[]
+    errors: Array<{ task_id: string; error: string }>
+    total_cancelled: number
+    total_errors: number
+  }> {
+    const response = await api.post('/api/tasks/batch/cancel', {
+      task_ids: taskIds
+    })
+    return response.data
   }
 }
 
@@ -171,6 +238,37 @@ export const dataApi = {
 
   async getAvailableActions(): Promise<{ actions: string[]; extractors: string[] }> {
     const response = await api.get('/api/actions')
+    return response.data
+  },
+
+  // 任务历史API
+  async getTaskHistory(params: {
+    start_date?: string
+    end_date?: string
+    status?: string
+    limit?: number
+    offset?: number
+  }): Promise<{ data: TaskHistoryItem[]; total: number }> {
+    const queryParams = new URLSearchParams()
+    if (params.start_date) queryParams.append('start_date', params.start_date)
+    if (params.end_date) queryParams.append('end_date', params.end_date)
+    if (params.status) queryParams.append('status', params.status)
+    if (params.limit) queryParams.append('limit', params.limit.toString())
+    if (params.offset) queryParams.append('offset', params.offset.toString())
+
+    const response = await api.get(`/api/task-history?${queryParams.toString()}`)
+    return response.data
+  },
+
+  async getHistoryStatistics(params: {
+    start_date?: string
+    end_date?: string
+  }): Promise<{ data: HistoryStatistics }> {
+    const queryParams = new URLSearchParams()
+    if (params.start_date) queryParams.append('start_date', params.start_date)
+    if (params.end_date) queryParams.append('end_date', params.end_date)
+
+    const response = await api.get(`/api/task-history/statistics?${queryParams.toString()}`)
     return response.data
   }
 }

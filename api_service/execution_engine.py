@@ -6,12 +6,14 @@ import sys
 import asyncio
 import base64
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 import logging
 import json
 import os
+import random
 
 from fastapi import BackgroundTasks
 
@@ -20,8 +22,316 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from scrapy_project.utils.scheduler import TaskStatus, TaskPriority
 from scrapy_project.utils.storage import storage_manager
 from api_service.websocket_manager import ws_manager, WebSocketMessageType
+from api_service.config import get_config
+from api_service.errors import ErrorCode, ErrorHandler, ErrorDetail
 
 logger = logging.getLogger(__name__)
+
+
+def convert_selector(selector: str, selector_type: str = "css") -> str:
+    """将不同类型的选择器转换为Playwright可识别的格式
+
+    Args:
+        selector: 用户输入的选择器值
+        selector_type: 选择器类型 (css, xpath, id, name, class)
+
+    Returns:
+        转换后的选择器字符串
+    """
+    if not selector:
+        return selector
+
+    selector_type = selector_type.lower() if selector_type else "css"
+
+    if selector_type == "xpath":
+        # XPath选择器保持不变，Playwright原生支持
+        return selector
+    elif selector_type == "id":
+        # ID选择器添加#前缀
+        if not selector.startswith("#"):
+            return f"#{selector}"
+        return selector
+    elif selector_type == "class":
+        # Class选择器添加.前缀，并处理多个class的情况
+        if not selector.startswith("."):
+            # 如果有空格分隔的多个class，转换为CSS复合选择器
+            classes = selector.split()
+            return ".".join(classes) if classes else f".{selector}"
+        return selector
+    elif selector_type == "name":
+        # Name属性选择器
+        return f'[name="{selector}"]'
+    else:
+        # CSS选择器，保持原样
+        return selector
+
+
+class AsyncPlaywrightBrowser:
+    """异步Playwright浏览器包装器"""
+
+    def __init__(self):
+        self.browser = None
+        self.page = None
+        self.context = None
+        self.process = None
+        self.port = None
+        self.playwright = None
+
+    async def start(self, task_id: str, url: str, headless: bool = False, config=None):
+        """启动浏览器 - 使用本地Chrome通过CDP连接"""
+        import socket
+        from playwright.async_api import async_playwright
+
+        # 获取Chrome路径
+        chrome_path = config.browser.chrome_path
+        if not os.path.exists(chrome_path):
+            raise FileNotFoundError(f"Chrome not found at: {chrome_path}")
+
+        # 查找可用端口
+        def find_free_port():
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', 0))
+                return s.getsockname()[1]
+
+        self.port = find_free_port()
+
+        logger.info(f"Starting local Chrome: {chrome_path}")
+
+        # 启动Chrome进程
+        CREATE_NO_WINDOW = 0x08000000
+        chrome_args = [
+            f'--remote-debugging-port={self.port}',
+            '--remote-debugging-address=127.0.0.1',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--new-window',
+        ]
+
+        if headless:
+            chrome_args.insert(0, '--headless=new')
+
+        self.process = subprocess.Popen(
+            [chrome_path] + chrome_args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            creationflags=CREATE_NO_WINDOW,
+        )
+
+        logger.info(f"Chrome started, PID: {self.process.pid}, Port: {self.port}")
+
+        # 等待Chrome启动
+        import time
+        max_wait = 15
+        waited = 0
+        while waited < max_wait:
+            try:
+                import http.client
+                conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
+                conn.request("GET", "/json/version")
+                response = conn.getresponse()
+                if response.status == 200:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+            waited += 0.5
+
+        # 连接Playwright
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.connect(
+            f'http://127.0.0.1:{self.port}', timeout=30000
+        )
+        self.context = await self.browser.new_context()
+        self.page = await self.context.new_page()
+
+        # 访问初始URL
+        if url:
+            await self.page.goto(url, wait_until='domcontentloaded', timeout=30000)
+
+        logger.info(f"Connected to Chrome successfully")
+        return self.browser, self.page
+
+    async def close(self):
+        """关闭浏览器"""
+        try:
+            if self.page:
+                await self.page.close()
+        except Exception as e:
+            logger.debug(f"Error closing page: {e}")
+
+        try:
+            if self.context:
+                await self.context.close()
+        except Exception as e:
+            logger.debug(f"Error closing context: {e}")
+
+        try:
+            if self.browser:
+                await self.browser.close()
+        except Exception as e:
+            logger.debug(f"Error closing browser: {e}")
+
+        try:
+            if self.playwright:
+                await self.playwright.stop()
+        except Exception as e:
+            logger.debug(f"Error stopping playwright: {e}")
+
+        # 关闭Chrome进程
+        if self.process:
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=5)
+            except Exception:
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+
+    async def execute_action(self, action: dict) -> tuple[bool, any]:
+        """执行操作（异步方法）"""
+        if not self.page:
+            logger.warning("[Browser] Page is None, 无法执行操作")
+            return False, "Page not available"
+
+        try:
+            action_type = action.get("type", "")
+            selector = action.get("selector", "")
+            selector_type = action.get("selector_type", "css")
+
+            logger.info(f"[Browser] 执行 action_type={action_type}, selector={selector}, selector_type={selector_type}")
+
+            # 执行操作
+            if action_type == "goto":
+                url = action.get("url", "")
+                logger.info(f"[Browser] 访问页面: {url}")
+                await self.page.goto(url, wait_until='networkidle', timeout=30000)
+                return True, None
+
+            elif action_type == "click":
+                if selector:
+                    converted = convert_selector(selector, selector_type)
+                    logger.info(f"[Browser] 点击元素: {converted}")
+                    await self.page.click(converted, timeout=5000)
+                    return True, None
+
+            elif action_type == "input":
+                if selector:
+                    converted = convert_selector(selector, selector_type)
+                    value = action.get("value", "")
+                    logger.info(f"[Browser] 输入内容到 {converted}: {value[:20]}...")
+                    await self.page.fill(converted, value)
+                    return True, None
+
+            elif action_type == "wait":
+                timeout = action.get("timeout", 1000)
+                logger.info(f"[Browser] 等待 {timeout}ms")
+                await asyncio.sleep(timeout / 1000)
+                return True, None
+
+            elif action_type == "wait_element":
+                if selector:
+                    converted = convert_selector(selector, selector_type)
+                    state = action.get("state", "present")
+                    timeout = action.get("timeout", 30000)
+                    logger.info(f"[Browser] 等待元素 {converted} 状态: {state}, 超时: {timeout}ms")
+                    locator = self.page.locator(converted)
+                    if state == "present":
+                        await locator.wait_for(state="attached", timeout=timeout)
+                    else:
+                        await locator.wait_for(state="detached", timeout=timeout)
+                    return True, None
+
+            elif action_type == "scroll":
+                direction = action.get("direction", "down")
+                amount = action.get("amount", 500)
+                if direction == "down":
+                    await self.page.evaluate(f"window.scrollBy(0, {amount})")
+                elif direction == "up":
+                    await self.page.evaluate(f"window.scrollBy(0, -{amount})")
+                elif direction == "top":
+                    await self.page.evaluate("window.scrollTo(0, 0)")
+                elif direction == "bottom":
+                    await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                return True, None
+
+            elif action_type == "press":
+                keys = action.get("keys", [])
+                if keys:
+                    await self.page.keyboard.press("+".join(keys))
+                if action.get("press_enter"):
+                    await self.page.keyboard.press("Enter")
+                return True, None
+
+            elif action_type == "hover":
+                if selector:
+                    converted = convert_selector(selector, selector_type)
+                    await self.page.hover(converted, timeout=5000)
+                    return True, None
+
+            elif action_type == "screenshot":
+                return True, None
+
+            elif action_type == "extract":
+                selectors = action.get("selectors", [])
+                extracted_data = {}
+                for sel in selectors:
+                    key = sel.get("name", f"field_{len(extracted_data)}")
+                    sel_selector = sel.get("selector", "")
+                    sel_type = sel.get("selectorType", "css")
+                    sel_extract_type = sel.get("extractType", "text")
+                    attr = sel.get("attribute", "href")
+
+                    if sel_selector:
+                        converted = convert_selector(sel_selector, sel_type)
+                        element = self.page.locator(converted)
+                        if sel_extract_type == "text":
+                            extracted_data[key] = await element.inner_text()
+                        elif sel_extract_type == "html":
+                            extracted_data[key] = await element.inner_html()
+                        elif sel_extract_type == "attribute":
+                            extracted_data[key] = await element.get_attribute(attr)
+                return True, extracted_data
+
+            elif action_type == "evaluate":
+                script = action.get("script", "")
+                if script:
+                    await self.page.evaluate(script)
+                    return True, None
+
+            elif action_type == "close_tab":
+                await self.page.close()
+                return True, None
+
+            elif action_type == "upload":
+                if selector:
+                    converted = convert_selector(selector, selector_type)
+                    file_paths = action.get("file_paths", [])
+                    await self.page.set_input_files(converted, file_paths)
+                    return True, None
+
+            elif action_type in ("start", "end"):
+                # start 和 end 是虚拟节点，不需要实际执行
+                return True, None
+
+            return False, f"Unknown action type: {action_type}"
+
+        except Exception as e:
+            logger.error(f"[Browser] 执行操作异常: {e}", exc_info=True)
+            return False, str(e)
+
+    async def take_screenshot(self, config) -> Optional[bytes]:
+        """截图"""
+        if not self.page:
+            return None
+        try:
+            return await self.page.screenshot(type='jpeg', quality=config.browser.screenshot_quality)
+        except Exception as e:
+            logger.debug(f"Failed to take screenshot: {e}")
+            return None
 
 
 class ExecutionEngine:
@@ -29,7 +339,7 @@ class ExecutionEngine:
 
     def __init__(self):
         self.executing_tasks: Dict[str, Dict[str, Any]] = {}
-        self.browser_contexts: Dict[str, Any] = {}  # 存储浏览器上下文
+        self.browser_contexts: Dict[str, AsyncPlaywrightBrowser] = {}  # 存储浏览器上下文
 
     async def execute_task(
         self,
@@ -106,20 +416,31 @@ class ExecutionEngine:
             logger.info(f"Task {task_id} was cancelled")
 
         except Exception as e:
-            error_msg = str(e)
+            error_detail = ErrorHandler.handle_exception(
+                exception=e,
+                error_code=ErrorCode.ERR_TASK_FAILED,
+                task_id=task_id
+            )
             task_info["status"] = "failed"
             task_info["end_time"] = datetime.now()
-            task_info["error"] = error_msg
+            task_info["error"] = error_detail.to_json()
 
             await ws_manager.send_task_error(
                 task_id=task_id,
-                error=error_msg,
-                details={"actions_executed": task_info["current_action"]}
+                error=error_detail.message,
+                details=error_detail.to_dict()
             )
 
-            logger.error(f"Task {task_id} failed: {error_msg}", exc_info=True)
+            logger.error(f"Task {task_id} failed: {error_detail.message}", exc_info=True)
 
         finally:
+            # 刷新所有待发送的日志
+            try:
+                from api_service.websocket_manager import batch_log_manager
+                await batch_log_manager.flush_all()
+            except Exception as e:
+                logger.debug(f"Failed to flush logs: {e}")
+
             # 清理浏览器上下文
             await self._close_browser(task_id)
 
@@ -151,17 +472,42 @@ class ExecutionEngine:
             message=f"正在打开目标页面 (headless={headless})"
         )
 
-        # 启动真实浏览器
-        browser, page = await self._start_browser(task_id, url, headless)
+        # 创建并启动浏览器
+        config = get_config()
+        browser_wrapper = AsyncPlaywrightBrowser()
+        self.browser_contexts[task_id] = browser_wrapper
 
-        if not browser or not page:
-            # 如果浏览器启动失败，回退到模拟模式
-            logger.warning(f"Browser startup failed for task {task_id}, falling back to simulation")
+        try:
+            browser, page = await browser_wrapper.start(task_id, url, headless, config)
+            logger.info(f"Browser started successfully for task {task_id}")
+
+            await ws_manager.send_task_log(
+                task_id=task_id,
+                level="info",
+                message="浏览器启动成功",
+                action_name="browser_start"
+            )
+
+            # 发送初始截图
+            await self._send_screenshot(task_id, browser_wrapper, 0)
+
+        except Exception as e:
+            logger.error(f"Failed to start browser: {e}")
+            await ws_manager.send_task_log(
+                task_id=task_id,
+                level="error",
+                message=f"启动浏览器失败: {str(e)}",
+                action_name="browser_start"
+            )
+            # 回退到模拟模式
             await self._simulate_browser_start(task_id, url)
+            return
 
         for index, action in enumerate(actions):
             action_type = action.get("type", "unknown")
             action_name = self._get_action_name(action_type)
+
+            logger.info(f"[Task {task_id}] 执行操作 {index+1}/{total_actions}: {action_name}, 数据: {action}")
 
             task_info = self.executing_tasks.get(task_id)
             if task_info:
@@ -186,24 +532,47 @@ class ExecutionEngine:
                 details=action
             )
 
-            # 尝试真实执行，如果失败则模拟
-            success = False
-            if page:
-                success = await self._execute_action_real(task_id, page, action)
+            # 执行操作
+            try:
+                logger.info(f"[Task {task_id}] 调用浏览器执行操作...")
+                success, result = await browser_wrapper.execute_action(action)
+                logger.info(f"[Task {task_id}] 操作执行完成: success={success}, result={result}")
 
-            if not success:
-                await self._execute_action(task_id, action)
+                if success:
+                    await ws_manager.send_task_log(
+                        task_id=task_id,
+                        level="success",
+                        message=f"操作 [{index + 1}/{total_actions}] 完成: {action_name}",
+                        action_name=action_name
+                    )
+
+                    # 如果有提取结果，发送
+                    if result and isinstance(result, dict):
+                        await ws_manager.send_task_result(task_id, {
+                            "extracted_data": result,
+                            "action_index": index
+                        })
+                else:
+                    logger.warning(f"[Task {task_id}] 操作失败: {result}")
+                    await ws_manager.send_task_log(
+                        task_id=task_id,
+                        level="warning",
+                        message=f"操作失败: {result}，跳过",
+                        action_name=action_name
+                    )
+
+            except Exception as e:
+                logger.error(f"[Task {task_id}] 操作执行异常: {e}", exc_info=True)
+                await ws_manager.send_task_log(
+                    task_id=task_id,
+                    level="warning",
+                    message=f"操作执行异常: {str(e)}，跳过",
+                    action_name=action_name
+                )
 
             # 发送截图
-            if page:
-                await self._send_screenshot(task_id, page, index + 1)
-
-            await ws_manager.send_task_log(
-                task_id=task_id,
-                level="success",
-                message=f"操作 [{index + 1}/{total_actions}] 完成: {action_name}",
-                action_name=action_name
-            )
+            logger.info(f"[Task {task_id}] 发送截图...")
+            await self._send_screenshot(task_id, browser_wrapper, index + 1)
 
         await ws_manager.send_task_status(
             task_id=task_id,
@@ -222,126 +591,11 @@ class ExecutionEngine:
             action_name="complete"
         )
 
-    async def _start_browser(self, task_id: str, url: str, headless: bool = False):
-        """启动真实浏览器"""
-        try:
-            # 本地Chrome路径
-            chrome_path = "E:\\chrome-win64\\chrome.exe"
-
-            # 检查Chrome是否已安装
-            if not os.path.exists(chrome_path):
-                raise FileNotFoundError(f"Chrome not found at: {chrome_path}")
-
-            await ws_manager.send_task_log(
-                task_id=task_id,
-                level="info",
-                message=f"正在启动浏览器...",
-                action_name="browser_start"
-            )
-
-            logger.info(f"Chrome path: {chrome_path}")
-
-            # 使用Windows subprocess启动Chrome带调试端口
-            debug_port = 9223  # 固定端口
-            chrome_args = [
-                '--remote-debugging-port=9223',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--new-window',
-                url,
-            ]
-
-            if headless:
-                chrome_args.insert(0, '--headless')
-
-            logger.info(f"Starting Chrome: {chrome_path} {' '.join(chrome_args)}")
-
-            # 使用Windows兼容的方式启动进程
-            process = subprocess.Popen(
-                [chrome_path] + chrome_args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=True,
-            )
-
-            logger.info(f"Chrome started, PID: {process.pid}")
-
-            # 等待浏览器启动
-            await asyncio.sleep(2)
-
-            # 尝试连接到浏览器
-            from playwright.sync_api import sync_playwright
-
-            # 在线程池中运行同步的playwright
-            loop = asyncio.get_event_loop()
-            browser, page = await loop.run_in_executor(
-                None,
-                self._connect_chrome_sync,
-                debug_port
-            )
-
-            await ws_manager.send_task_log(
-                task_id=task_id,
-                level="info",
-                message=f"页面已加载: {url}",
-                action_name="browser_start"
-            )
-
-            # 发送初始截图
-            await self._send_screenshot(task_id, page, 0)
-
-            # 保存浏览器引用
-            self.browser_contexts[task_id] = (browser, page, process)
-
-            logger.info(f"Browser started successfully for task {task_id}")
-            return browser, page
-
-        except FileNotFoundError as e:
-            logger.error(f"Chrome not found: {e}")
-            await ws_manager.send_task_log(
-                task_id=task_id,
-                level="error",
-                message=f"Chrome浏览器未找到: {str(e)}",
-                action_name="browser_start"
-            )
-            await self._simulate_browser_start(task_id, url)
-            return None, None
-        except Exception as e:
-            logger.error(f"Failed to start browser: {e}", exc_info=True)
-            await ws_manager.send_task_log(
-                task_id=task_id,
-                level="error",
-                message=f"启动浏览器失败: {str(e)}",
-                action_name="browser_start"
-            )
-            # 回退到模拟模式
-            await self._simulate_browser_start(task_id, url)
-            return None, None
-
-    def _connect_chrome_sync(self, debug_port: int):
-        """同步连接到Chrome（运行在线程池中）"""
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            # 连接到已运行的Chrome
-            browser = p.chromium.connect_over_cdp(f'http://localhost:{debug_port}')
-
-            # 获取页面
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = context.pages[0] if context.pages else context.new_page()
-
-            return browser, page
-
     async def _close_browser(self, task_id: str):
         """关闭浏览器"""
         try:
             if task_id in self.browser_contexts:
-                ctx = self.browser_contexts[task_id]
-                browser = ctx[0] if len(ctx) > 0 else None
-                page = ctx[1] if len(ctx) > 1 else None
-                process = ctx[2] if len(ctx) > 2 else None
+                browser_wrapper = self.browser_contexts[task_id]
 
                 await ws_manager.send_task_log(
                     task_id=task_id,
@@ -350,27 +604,7 @@ class ExecutionEngine:
                     action_name="browser_close"
                 )
 
-                # 关闭页面
-                if page:
-                    try:
-                        await page.close()
-                    except Exception as e:
-                        logger.debug(f"Error closing page: {e}")
-
-                # 关闭浏览器连接
-                if browser:
-                    try:
-                        await browser.close()
-                    except Exception as e:
-                        logger.debug(f"Error closing browser: {e}")
-
-                # 如果有Chrome进程，终止它
-                if process:
-                    try:
-                        process.terminate()
-                        process.wait(timeout=5)
-                    except Exception:
-                        process.kill()
+                await browser_wrapper.close()
 
                 await ws_manager.send_task_log(
                     task_id=task_id,
@@ -381,20 +615,51 @@ class ExecutionEngine:
 
                 logger.info(f"Browser closed for task {task_id}")
 
-                # 清理上下文
                 del self.browser_contexts[task_id]
 
         except Exception as e:
             logger.error(f"Error closing browser: {e}")
 
-    async def _send_screenshot(self, task_id: str, page, action_index: int):
+    async def _send_screenshot(self, task_id: str, browser_wrapper: AsyncPlaywrightBrowser, action_index: int, force: bool = False):
         """发送页面截图"""
         try:
-            screenshot_bytes = await page.screenshot(
-                type='jpeg',
-                quality=70
-            )
-            screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+            config = get_config()
+            perf_config = config.performance
+
+            # 检查是否禁用实时截图
+            if perf_config.disable_realtime_screenshot and not force:
+                return
+
+            # 检查截图间隔
+            if not force and action_index % perf_config.screenshot_interval != 0:
+                return
+
+            # 异步截图
+            screenshot_bytes = await browser_wrapper.take_screenshot(config)
+
+            if not screenshot_bytes:
+                return
+
+            # 压缩图片
+            try:
+                import io
+                from PIL import Image
+
+                img = Image.open(io.BytesIO(screenshot_bytes))
+                max_width = config.browser.screenshot_max_width
+
+                if img.width > max_width:
+                    ratio = max_width / img.width
+                    new_height = int(img.height * ratio)
+                    img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+
+                output = io.BytesIO()
+                img.save(output, format='JPEG', quality=config.browser.screenshot_quality, optimize=True)
+                compressed_bytes = output.getvalue()
+
+                screenshot_base64 = base64.b64encode(compressed_bytes).decode('utf-8')
+            except ImportError:
+                screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
 
             await ws_manager.send_task_screenshot(
                 task_id=task_id,
@@ -403,103 +668,14 @@ class ExecutionEngine:
             )
 
         except Exception as e:
-            logger.warning(f"Failed to send screenshot: {e}")
-
-    async def _execute_action_real(self, task_id: str, page, action: Dict[str, Any]) -> bool:
-        """使用Playwright执行真实操作"""
-        try:
-            action_type = action.get("type", "")
-
-            if action_type == "goto":
-                url = action.get("url", "")
-                if url:
-                    await page.goto(url, wait_until='networkidle', timeout=30000)
-                    return True
-
-            elif action_type == "click":
-                selector = action.get("selector", "")
-                by_image = action.get("by_image", False)
-
-                if by_image:
-                    # 图片点击需要额外处理
-                    return False
-
-                if selector:
-                    await page.click(selector, timeout=5000)
-                    return True
-
-            elif action_type == "input":
-                selector = action.get("selector", "")
-                value = action.get("value", "")
-                clear = action.get("clear", True)
-
-                if selector:
-                    await page.fill(selector, value)
-                    return True
-
-            elif action_type == "wait":
-                timeout = action.get("timeout", 1000)
-                await asyncio.sleep(timeout / 1000)
-                return True
-
-            elif action_type == "scroll":
-                direction = action.get("direction", "down")
-                amount = action.get("amount", 500)
-
-                if direction == "down":
-                    await page.evaluate(f"window.scrollBy(0, {amount})")
-                elif direction == "up":
-                    await page.evaluate(f"window.scrollBy(0, -{amount})")
-                elif direction == "top":
-                    await page.evaluate("window.scrollTo(0, 0)")
-                elif direction == "bottom":
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                return True
-
-            elif action_type == "press":
-                keys = action.get("keys", [])
-                press_enter = action.get("press_enter", False)
-
-                if keys:
-                    await page.keyboard.press("+".join(keys))
-                if press_enter:
-                    await page.keyboard.press("Enter")
-                return True
-
-            elif action_type == "hover":
-                selector = action.get("selector", "")
-                if selector:
-                    await page.hover(selector, timeout=5000)
-                    return True
-
-            elif action_type == "screenshot":
-                # 截图已通过_send_screenshot处理
-                return True
-
-            elif action_type == "extract":
-                # 数据提取已通过截图发送
-                return True
-
-            elif action_type == "evaluate":
-                script = action.get("script", "")
-                if script:
-                    await page.evaluate(script)
-                    return True
-
-            elif action_type == "new_tab":
-                # 新标签页处理
-                await page.evaluate("window.open(arguments[0], '_blank')", action.get("url", ""))
-                return True
-
-            return False
-
-        except Exception as e:
-            logger.warning(f"Real action execution failed: {e}")
-            return False
+            logger.debug(f"Failed to send screenshot: {e}")
 
     async def _simulate_browser_start(self, task_id: str, url: str):
         """模拟浏览器启动过程（当Playwright不可用时）"""
-        await asyncio.sleep(0.5)
+        config = get_config()
+        sim_config = config.simulation
+
+        await asyncio.sleep(sim_config.browser_start_delay)
 
         await ws_manager.send_task_log(
             task_id=task_id,
@@ -508,7 +684,7 @@ class ExecutionEngine:
             action_name="browser_start"
         )
 
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(sim_config.action_delay)
 
         await ws_manager.send_task_log(
             task_id=task_id,
@@ -519,7 +695,9 @@ class ExecutionEngine:
 
     async def _simulate_browser_close(self, task_id: str):
         """模拟浏览器关闭过程"""
-        await asyncio.sleep(0.2)
+        config = get_config()
+
+        await asyncio.sleep(config.simulation.browser_close_delay)
 
         await ws_manager.send_task_log(
             task_id=task_id,
@@ -531,8 +709,9 @@ class ExecutionEngine:
     async def _execute_action(self, task_id: str, action: Dict[str, Any]):
         """执行单个操作（模拟模式）"""
         action_type = action.get("type", "unknown")
+        config = get_config()
 
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(config.simulation.action_delay)
 
         details = {}
 

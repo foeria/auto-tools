@@ -25,9 +25,15 @@ from scrapy_project.utils.scheduler import TaskPriority, TaskStatus, Task
 from scrapy_project.utils.storage import storage_manager
 from api_service.websocket_manager import ws_manager, WebSocketMessageType
 from api_service.execution_engine import execution_engine
+from api_service.config import get_config, setup_logging
+from api_service.errors import ErrorCode, ErrorHandler, ErrorDetail
 
-logging.basicConfig(level=logging.INFO)
+# 加载配置
+config = get_config()
+setup_logging(config)
+
 logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -43,10 +49,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 添加CORS中间件
+# 添加CORS中间件 (使用配置)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允许所有来源，生产环境建议指定具体域名
+    allow_origins=config.api.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -87,6 +93,19 @@ class TaskInfo(BaseModel):
 class TaskListResponse(BaseModel):
     total: int
     tasks: List[TaskInfo]
+
+
+class BatchTaskCreate(BaseModel):
+    tasks: List[TaskCreate] = Field(..., min_length=1, max_length=50, description="任务列表，最多为50个")
+    max_retries: int = Field(default=3, ge=0, le=10, description="默认最大重试次数")
+
+
+class BatchTaskDelete(BaseModel):
+    task_ids: List[str] = Field(..., min_length=1, max_length=100, description="任务ID列表，最多为100个")
+
+
+class BatchTaskCancel(BaseModel):
+    task_ids: List[str] = Field(..., min_length=1, max_length=100, description="任务ID列表，最多为100个")
 
 
 class TaskStatusEnum(str, Enum):
@@ -267,10 +286,17 @@ async def list_tasks(
 @app.get("/api/tasks/{task_id}", response_model=TaskInfo, tags=["任务管理"])
 async def get_task(task_id: str):
     if task_id not in tasks_db:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
+        error = ErrorHandler.create_task_error(
+            task_id=task_id,
+            error_code=ErrorCode.ERR_TASK_NOT_FOUND,
+            message="任务不存在",
+            reason=f"任务ID: {task_id}",
+            suggestion="请检查任务ID是否正确"
+        )
+        raise HTTPException(status_code=404, detail=error)
+
     task = tasks_db[task_id]
-    
+
     return TaskInfo(
         id=task.id,
         url=task.url,
@@ -290,17 +316,24 @@ async def get_task(task_id: str):
 @app.get("/api/tasks/{task_id}/status", tags=["任务管理"])
 async def get_task_status(task_id: str):
     task_info = execution_engine.get_task_status(task_id)
-    
+
     if task_info:
         return {
             "task_id": task_id,
             "status": "running",
             "executing": task_info
         }
-    
+
     if task_id not in tasks_db:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
+        error = ErrorHandler.create_task_error(
+            task_id=task_id,
+            error_code=ErrorCode.ERR_TASK_NOT_FOUND,
+            message="任务不存在",
+            reason=f"任务ID: {task_id}",
+            suggestion="请检查任务ID是否正确"
+        )
+        raise HTTPException(status_code=404, detail=error)
+
     task = tasks_db[task_id]
     return {
         "task_id": task_id,
@@ -312,21 +345,35 @@ async def get_task_status(task_id: str):
 @app.delete("/api/tasks/{task_id}", tags=["任务管理"])
 async def delete_task(task_id: str):
     if task_id not in tasks_db:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
+        error = ErrorHandler.create_task_error(
+            task_id=task_id,
+            error_code=ErrorCode.ERR_TASK_NOT_FOUND,
+            message="任务不存在",
+            reason=f"任务ID: {task_id}",
+            suggestion="请检查任务ID是否正确"
+        )
+        raise HTTPException(status_code=404, detail=error)
+
     task = tasks_db[task_id]
     task.status = TaskStatus.CANCELLED
-    
+
     del tasks_db[task_id]
-    
+
     return {"message": "任务已删除"}
 
 
 @app.post("/api/tasks/{task_id}/retry", response_model=TaskResponse, tags=["任务管理"])
 async def retry_task(task_id: str, background_tasks: BackgroundTasks):
     if task_id not in tasks_db:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
+        error = ErrorHandler.create_task_error(
+            task_id=task_id,
+            error_code=ErrorCode.ERR_TASK_NOT_FOUND,
+            message="任务不存在",
+            reason=f"任务ID: {task_id}",
+            suggestion="请检查任务ID是否正确"
+        )
+        raise HTTPException(status_code=404, detail=error)
+
     task = tasks_db[task_id]
     
     task.status = TaskStatus.PENDING
@@ -354,14 +401,41 @@ async def retry_task(task_id: str, background_tasks: BackgroundTasks):
 
 @app.post("/api/tasks/{task_id}/cancel", tags=["任务管理"])
 async def cancel_task(task_id: str):
+    """取消正在运行的任务"""
+    # 发送取消中状态
+    await ws_manager.send_task_status(
+        task_id=task_id,
+        status="cancelling",
+        progress=0,
+        current_action="正在取消",
+        message="正在取消任务..."
+    )
+
     # 首先关闭浏览器（如果正在运行）
     if task_id in execution_engine.browser_contexts:
         try:
-            browser, page = execution_engine.browser_contexts[task_id]
+            ctx = execution_engine.browser_contexts[task_id]
+            if isinstance(ctx, dict):
+                page = ctx.get("page")
+                browser = ctx.get("browser")
+                process = ctx.get("process")
+            else:
+                # 兼容旧版本的元组格式
+                page = ctx[1] if len(ctx) > 1 else None
+                browser = ctx[0] if len(ctx) > 0 else None
+                process = ctx[2] if len(ctx) > 2 else None
+
             if page:
                 await page.close()
             if browser:
                 await browser.close()
+            if process:
+                try:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except Exception:
+                    process.kill()
+
             logger.info(f"Browser closed for cancelled task: {task_id}")
         except Exception as e:
             logger.error(f"Error closing browser during cancel: {e}")
@@ -377,7 +451,14 @@ async def cancel_task(task_id: str):
         del execution_engine.executing_tasks[task_id]
 
     if task_id not in tasks_db:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        await ws_manager.send_task_status(
+            task_id=task_id,
+            status="cancelled",
+            progress=0,
+            current_action="任务已取消",
+            message="任务已取消执行"
+        )
+        return {"message": "任务已取消"}
 
     task = tasks_db[task_id]
     task.status = TaskStatus.CANCELLED
@@ -391,6 +472,169 @@ async def cancel_task(task_id: str):
     )
 
     return {"message": "任务已取消"}
+
+
+@app.post("/api/tasks/batch", tags=["任务管理"])
+async def create_tasks_batch(request: BatchTaskCreate):
+    """批量创建任务"""
+    created_tasks = []
+    errors = []
+
+    for i, task_data in enumerate(request.tasks):
+        try:
+            task_id = str(uuid.uuid4())
+            task = Task(
+                id=task_id,
+                url=task_data.url,
+                actions=task_data.actions,
+                extractors=task_data.extractors or [],
+                priority=task_data.priority or 0,
+                max_retries=request.max_retries or 3,
+                metadata=task_data.metadata or {}
+            )
+            task_id = storage_manager.save_task_with_queue(task.to_dict(), task.priority.value)
+            created_tasks.append({
+                "task_id": task_id,
+                "url": task.url,
+                "status": "pending"
+            })
+        except Exception as e:
+            errors.append({
+                "index": i,
+                "error": str(e)
+            })
+
+    return {
+        "created": created_tasks,
+        "errors": errors,
+        "total_created": len(created_tasks),
+        "total_errors": len(errors)
+    }
+
+
+@app.delete("/api/tasks/batch", tags=["任务管理"])
+async def delete_tasks_batch(request: BatchTaskDelete):
+    """批量删除任务"""
+    deleted = []
+    errors = []
+
+    for task_id in request.task_ids:
+        try:
+            if task_id in tasks_db:
+                del tasks_db[task_id]
+            if task_id in execution_engine.executing_tasks:
+                del execution_engine.executing_tasks[task_id]
+            if task_id in execution_engine.browser_contexts:
+                try:
+                    ctx = execution_engine.browser_contexts[task_id]
+                    if isinstance(ctx, dict):
+                        page = ctx.get("page")
+                        browser = ctx.get("browser")
+                        process = ctx.get("process")
+                    else:
+                        page = ctx[1] if len(ctx) > 1 else None
+                        browser = ctx[0] if len(ctx) > 0 else None
+                        process = ctx[2] if len(ctx) > 2 else None
+
+                    if page:
+                        await page.close()
+                    if browser:
+                        await browser.close()
+                    if process:
+                        try:
+                            process.terminate()
+                            process.wait(timeout=5)
+                        except Exception:
+                            process.kill()
+                except Exception as e:
+                    logger.error(f"Error closing browser during batch delete: {e}")
+
+            deleted.append(task_id)
+        except Exception as e:
+            errors.append({
+                "task_id": task_id,
+                "error": str(e)
+            })
+
+    return {
+        "deleted": deleted,
+        "errors": errors,
+        "total_deleted": len(deleted),
+        "total_errors": len(errors)
+    }
+
+
+@app.post("/api/tasks/batch/cancel", tags=["任务管理"])
+async def cancel_tasks_batch(request: BatchTaskCancel):
+    """批量取消任务"""
+    cancelled = []
+    errors = []
+
+    for task_id in request.task_ids:
+        try:
+            if task_id not in tasks_db:
+                errors.append({"task_id": task_id, "error": "任务不存在"})
+                continue
+
+            task = tasks_db[task_id]
+            if task.status in [TaskStatus.COMPLETED, TaskStatus.CANCELLED]:
+                errors.append({"task_id": task_id, "error": f"任务状态为 {task.status.value}，无法取消"})
+                continue
+
+            # 发送取消中状态
+            await ws_manager.send_task_status(
+                task_id=task_id,
+                status="cancelling",
+                progress=0,
+                current_action="正在取消",
+                message="正在批量取消任务..."
+            )
+
+            # 关闭浏览器
+            if task_id in execution_engine.browser_contexts:
+                try:
+                    ctx = execution_engine.browser_contexts[task_id]
+                    if isinstance(ctx, dict):
+                        page = ctx.get("page")
+                        browser = ctx.get("browser")
+                        process = ctx.get("process")
+                    else:
+                        page = ctx[1] if len(ctx) > 1 else None
+                        browser = ctx[0] if len(ctx) > 0 else None
+                        process = ctx[2] if len(ctx) > 2 else None
+
+                    if page:
+                        await page.close()
+                    if browser:
+                        await browser.close()
+                    if process:
+                        try:
+                            process.terminate()
+                            process.wait(timeout=5)
+                        except Exception:
+                            process.kill()
+                except Exception as e:
+                    logger.error(f"Error closing browser during batch cancel: {e}")
+
+            task.status = TaskStatus.CANCELLED
+            await ws_manager.send_task_status(
+                task_id=task_id,
+                status="cancelled",
+                progress=0,
+                current_action="任务已取消",
+                message="任务已取消执行"
+            )
+
+            cancelled.append(task_id)
+        except Exception as e:
+            errors.append({"task_id": task_id, "error": str(e)})
+
+    return {
+        "cancelled": cancelled,
+        "errors": errors,
+        "total_cancelled": len(cancelled),
+        "total_errors": len(errors)
+    }
 
 
 @app.get("/api/templates", response_model=List[TemplateResponse], tags=["模板管理"])
@@ -443,7 +687,13 @@ async def delete_template(template_id: str):
     success = storage_manager.db.delete_template(template_id)
 
     if not success:
-        raise HTTPException(status_code=404, detail="模板不存在")
+        error = {
+            "error_code": ErrorCode.ERR_TASK_NOT_FOUND.value,
+            "message": "模板不存在",
+            "reason": f"模板ID: {template_id}",
+            "suggestion": "请检查模板ID是否正确"
+        }
+        raise HTTPException(status_code=404, detail=error)
 
     return {"message": "模板已删除"}
 
@@ -458,23 +708,35 @@ async def forward_data(forward_request: ForwardRequest):
                 headers=forward_request.headers,
                 timeout=30.0
             )
-            
+
             return ForwardResponse(
                 success=response.status_code < 400,
                 status_code=response.status_code,
                 response=response.json() if response.status_code < 400 else None
             )
-            
+
     except httpx.TimeoutException:
-        raise HTTPException(status_code=408, detail="转发超时")
+        error = {
+            "error_code": ErrorCode.ERR_SYS_WEBSOCKET.value,
+            "message": "数据转发超时",
+            "reason": "目标服务器响应超时",
+            "suggestion": "请检查目标服务器是否可访问，或增加超时时间"
+        }
+        raise HTTPException(status_code=408, detail=error)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"转发失败: {str(e)}")
+        error = {
+            "error_code": ErrorCode.ERR_SYS_WEBSOCKET.value,
+            "message": "数据转发失败",
+            "reason": str(e),
+            "suggestion": "请检查目标URL和网络连接"
+        }
+        raise HTTPException(status_code=500, detail=error)
 
 
 @app.get("/api/statistics", response_model=StatisticsResponse, tags=["监控"])
 async def get_statistics():
     stats = storage_manager.get_statistics()
-    
+
     return StatisticsResponse(
         total_tasks=stats.get('total_tasks', 0),
         completed_tasks=stats.get('completed_tasks', 0),
@@ -483,6 +745,119 @@ async def get_statistics():
         queue_size=stats.get('queue_size', 0),
         total_data_records=stats.get('total_data_records', 0)
     )
+
+
+@app.get("/api/task-history", tags=["任务历史"])
+async def get_task_history(
+    start_date: str = None,
+    end_date: str = None,
+    status: str = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    """获取任务执行历史记录"""
+    try:
+        # 从数据库获取历史记录
+        history = storage_manager.db.list_task_history(
+            start_date=start_date,
+            end_date=end_date,
+            status=status,
+            limit=limit,
+            offset=offset
+        )
+
+        # 增强历史数据（添加计算字段）
+        enhanced_history = []
+        for task in history:
+            # 计算执行时长
+            duration = None
+            if task.get('started_at') and task.get('completed_at'):
+                try:
+                    start = datetime.fromisoformat(task['started_at'])
+                    end = datetime.fromisoformat(task['completed_at'])
+                    duration = (end - start).total_seconds()
+                except Exception:
+                    duration = None
+
+            enhanced_history.append({
+                **task,
+                'duration': duration,
+                'success_count': len([a for a in task.get('actions', []) if a.get('status') == 'success']),
+                'failed_count': len([a for a in task.get('actions', []) if a.get('status') == 'failed']),
+                'avg_step_duration': duration / len(task.get('actions', [])) if duration and task.get('actions') else None
+            })
+
+        return {
+            "success": True,
+            "data": enhanced_history,
+            "total": len(history),
+            "limit": limit,
+            "offset": offset
+        }
+    except Exception as e:
+        logger.error(f"获取任务历史失败: {e}")
+        return {
+            "success": False,
+            "data": [],
+            "error": str(e)
+        }
+
+
+@app.get("/api/task-history/statistics", tags=["任务历史"])
+async def get_history_statistics(
+    start_date: str = None,
+    end_date: str = None
+):
+    """获取任务历史统计数据"""
+    try:
+        history = storage_manager.db.list_task_history(
+            start_date=start_date,
+            end_date=end_date,
+            limit=10000  # 获取全部用于统计
+        )
+
+        completed = [t for t in history if t.get('status') == 'completed']
+        failed = [t for t in history if t.get('status') == 'failed']
+        cancelled = [t for t in history if t.get('status') == 'cancelled']
+
+        # 计算平均执行时长
+        durations = []
+        for task in completed:
+            if task.get('started_at') and task.get('completed_at'):
+                try:
+                    start = datetime.fromisoparse(task['started_at'])
+                    end = datetime.fromisoformat(task['completed_at'])
+                    durations.append((end - start).total_seconds())
+                except Exception:
+                    pass
+
+        avg_duration = sum(durations) / len(durations) if durations else 0
+
+        return {
+            "success": True,
+            "data": {
+                "total_tasks": len(history),
+                "completed_tasks": len(completed),
+                "failed_tasks": len(failed),
+                "cancelled_tasks": len(cancelled),
+                "success_rate": len(completed) / len(history) * 100 if history else 0,
+                "avg_duration": avg_duration
+            }
+        }
+    except Exception as e:
+        logger.error(f"获取历史统计失败: {e}")
+        return {
+            "success": False,
+            "data": {
+                "total_tasks": 0,
+                "completed_tasks": 0,
+                "failed_tasks": 0,
+                "cancelled_tasks": 0,
+                "success_rate": 0,
+                "avg_duration": 0
+            },
+            "error": str(e)
+        }
 
 
 @app.get("/api/executing-tasks", tags=["监控"])

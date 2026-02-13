@@ -40,6 +40,46 @@
             </el-col>
           </el-row>
 
+          <!-- 批量操作工具栏 -->
+          <transition name="el-zoom-in-top">
+            <el-row v-if="selectedTasks.length > 0" :gutter="10" class="batch-toolbar">
+              <el-col>
+                <el-tag type="info" effect="plain" class="selection-info">
+                  已选择 {{ selectedTasks.length }} 项
+                </el-tag>
+                <el-button
+                  size="small"
+                  type="success"
+                  :disabled="!canBatchRun"
+                  @click="batchReRun"
+                >
+                  <el-icon><VideoPlay /></el-icon>
+                  批量重试
+                </el-button>
+                <el-button
+                  size="small"
+                  type="warning"
+                  :disabled="!canBatchCancel"
+                  @click="batchCancel"
+                >
+                  <el-icon><CircleClose /></el-icon>
+                  批量取消
+                </el-button>
+                <el-button
+                  size="small"
+                  type="danger"
+                  @click="batchDelete"
+                >
+                  <el-icon><Delete /></el-icon>
+                  批量删除
+                </el-button>
+                <el-button size="small" @click="clearSelection">
+                  取消选择
+                </el-button>
+              </el-col>
+            </el-row>
+          </transition>
+
           <el-table
             :data="filteredTasks"
             style="width: 100%"
@@ -266,7 +306,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, View, VideoPlay, Delete, Plus, Edit, Download, Operation } from '@element-plus/icons-vue'
+import { Refresh, View, VideoPlay, Delete, Plus, Edit, Download, Operation, CircleClose } from '@element-plus/icons-vue'
 import { taskApi } from '@/services/api'
 
 interface Task {
@@ -482,6 +522,126 @@ async function deleteTask(taskId: string) {
   }
 }
 
+// ========== 批量操作相关函数 ==========
+
+const canBatchRun = computed(() => {
+  return selectedTasks.value.length > 0 &&
+    selectedTasks.value.every(t => t.status === 'failed' || t.status === 'completed')
+})
+
+const canBatchCancel = computed(() => {
+  return selectedTasks.value.length > 0 &&
+    selectedTasks.value.some(t => t.status === 'pending' || t.status === 'running')
+})
+
+function clearSelection() {
+  selectedTasks.value = []
+}
+
+async function batchReRun() {
+  try {
+    await ElMessageBox.confirm(
+      `确定要批量重新运行选中的 ${selectedTasks.value.length} 个任务吗？`,
+      '批量操作确认',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+
+    const taskIds = selectedTasks.value.map(t => t.id)
+    ElMessage.info(`正在批量提交 ${taskIds.length} 个任务...`)
+
+    const tasksToCreate = selectedTasks.value.map(t => ({
+      url: t.url,
+      actions: t.actions || []
+    }))
+
+    const result = await taskApi.createBatch(tasksToCreate)
+
+    if (result.total_errors > 0) {
+      ElMessage.warning(`批量创建完成: 成功 ${result.total_created}，失败 ${result.total_errors}`)
+    } else {
+      ElMessage.success(`成功批量创建 ${result.total_created} 个任务`)
+    }
+
+    clearSelection()
+    await fetchTasks()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('批量重试失败:', error)
+      ElMessage.error('批量重试失败')
+    }
+  }
+}
+
+async function batchCancel() {
+  try {
+    await ElMessageBox.confirm(
+      `确定要批量取消选中的 ${selectedTasks.value.length} 个任务吗？`,
+      '批量操作确认',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+
+    const taskIds = selectedTasks.value.map(t => t.id)
+    ElMessage.info(`正在批量取消 ${taskIds.length} 个任务...`)
+
+    const result = await taskApi.cancelBatch(taskIds)
+
+    if (result.total_errors > 0) {
+      ElMessage.warning(`批量取消完成: 成功 ${result.total_cancelled}，失败 ${result.total_errors}`)
+    } else {
+      ElMessage.success(`成功批量取消 ${result.total_cancelled} 个任务`)
+    }
+
+    clearSelection()
+    await fetchTasks()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('批量取消失败:', error)
+      ElMessage.error('批量取消失败')
+    }
+  }
+}
+
+async function batchDelete() {
+  try {
+    await ElMessageBox.confirm(
+      `确定要批量删除选中的 ${selectedTasks.value.length} 个任务吗？此操作不可恢复！`,
+      '危险操作确认',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+
+    const taskIds = selectedTasks.value.map(t => t.id)
+    ElMessage.info(`正在批量删除 ${taskIds.length} 个任务...`)
+
+    const result = await taskApi.deleteBatch(taskIds)
+
+    if (result.total_errors > 0) {
+      ElMessage.warning(`批量删除完成: 成功 ${result.total_deleted}，失败 ${result.total_errors}`)
+    } else {
+      ElMessage.success(`成功批量删除 ${result.total_deleted} 个任务`)
+    }
+
+    clearSelection()
+    await fetchTasks()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('批量删除失败:', error)
+      ElMessage.error('批量删除失败')
+    }
+  }
+}
+
 // ========== 工作流管理相关函数 ==========
 
 function handleTabChange(tab: string) {
@@ -640,6 +800,25 @@ onMounted(() => {
     margin-top: 20px;
     padding-top: 20px;
     border-top: 1px solid #ebeef5;
+  }
+
+  .batch-toolbar {
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background-color: #f5f7fa;
+    border-radius: 4px;
+    border: 1px solid #e4e7ed;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+
+    .selection-info {
+      margin-right: 8px;
+    }
+
+    .el-button {
+      margin-left: 0;
+    }
   }
 }
 </style>

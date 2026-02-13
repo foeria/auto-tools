@@ -2,7 +2,8 @@
 WebSocket服务模块
 提供任务状态实时推送功能
 """
-from typing import Dict, Set, Any
+import asyncio
+from typing import Dict, Set, Any, List
 from datetime import datetime
 import json
 import logging
@@ -234,4 +235,172 @@ class ConnectionManager:
         return len(self.global_connections)
 
 
-ws_manager = ConnectionManager()
+class BatchLogManager:
+    """日志批量发送管理器"""
+
+    def __init__(self, batch_interval: int = 100, batch_size: int = 10):
+        self.batch_interval = batch_interval  # 毫秒
+        self.batch_size = batch_size
+        self.pending_logs: Dict[str, List[Dict[str, Any]]] = {}
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._lock = asyncio.Lock()
+
+    async def _flush_logs(self, task_id: str):
+        """刷新单个任务的日志"""
+        async with self._lock:
+            if task_id not in self.pending_logs:
+                return
+
+            logs = self.pending_logs.pop(task_id, [])
+            if not logs:
+                return
+
+        # 批量发送日志
+        payload = {
+            "task_id": task_id,
+            "logs": logs,
+            "batch_count": len(logs)
+        }
+
+        await self.broadcast(
+            WebSocketMessage(
+                type=WebSocketMessageType.TASK_LOG,
+                payload=payload,
+                task_id=task_id
+            ),
+            task_id
+        )
+
+    async def add_log(
+        self,
+        task_id: str,
+        level: str,
+        message: str,
+        action_name: str = None,
+        details: Dict[str, Any] = None
+    ):
+        """添加日志到批量队列"""
+        log_entry = {
+            "level": level,
+            "message": message,
+            "action_name": action_name,
+            "details": details or {},
+            "timestamp": datetime.now().isoformat()
+        }
+
+        async with self._lock:
+            if task_id not in self.pending_logs:
+                self.pending_logs[task_id] = []
+
+            self.pending_logs[task_id].append(log_entry)
+            log_count = len(self.pending_logs[task_id])
+
+            # 如果有正在运行的任务，取消它
+            if task_id in self._tasks and not self._tasks[task_id].done():
+                self._tasks[task_id].cancel()
+
+            # 创建新的刷新任务
+            if log_count >= self.batch_size:
+                # 达到批量大小，立即发送
+                await self._flush_logs(task_id)
+            else:
+                # 设置延迟发送任务
+                self._tasks[task_id] = asyncio.create_task(
+                    self._delayed_flush(task_id)
+                )
+
+    async def _delayed_flush(self, task_id: str):
+        """延迟刷新日志"""
+        await asyncio.sleep(self.batch_interval / 1000.0)
+        await self._flush_logs(task_id)
+
+    async def flush_all(self):
+        """刷新所有待发送的日志"""
+        task_ids = list(self.pending_logs.keys())
+        await asyncio.gather(
+            *[self._flush_logs(task_id) for task_id in task_ids],
+            return_exceptions=True
+        )
+
+    async def broadcast(self, message: WebSocketMessage, task_id: str = None):
+        """广播消息（引用外部manager）"""
+        # 这个方法会在外部被设置
+        pass
+
+
+# 创建批量日志管理器实例
+batch_log_manager = BatchLogManager()
+
+
+class OptimizedConnectionManager(ConnectionManager):
+    """优化的连接管理器，支持日志批量发送"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 设置批量日志管理器的广播方法
+        batch_log_manager.broadcast = self._batch_broadcast
+
+    async def _batch_broadcast(self, message: WebSocketMessage, task_id: str = None):
+        """批量广播消息"""
+        connections = set()
+
+        if task_id and task_id in self.active_connections:
+            connections = self.active_connections[task_id]
+
+        connections.update(self.global_connections)
+
+        for connection in connections:
+            await self.send_message(connection, message)
+
+    async def send_task_log(
+        self,
+        task_id: str,
+        level: str,
+        message: str,
+        action_name: str = None,
+        details: Dict[str, Any] = None
+    ):
+        """使用批量发送日志"""
+        # 重要日志（error, warning）立即发送
+        if level in ("error", "warning", "success"):
+            payload = {
+                "task_id": task_id,
+                "level": level,
+                "message": message,
+                "action_name": action_name,
+                "details": details or {}
+            }
+
+            await self.broadcast(
+                WebSocketMessage(
+                    type=WebSocketMessageType.TASK_LOG,
+                    payload=payload,
+                    task_id=task_id
+                ),
+                task_id
+            )
+        else:
+            # info 日志使用批量发送
+            await batch_log_manager.add_log(
+                task_id=task_id,
+                level=level,
+                message=message,
+                action_name=action_name,
+                details=details
+            )
+
+    async def broadcast(self, message: WebSocketMessage, task_id: str = None):
+        """覆盖父类的broadcast方法"""
+        connections = set()
+
+        if task_id and task_id in self.active_connections:
+            connections = self.active_connections[task_id]
+
+        connections.update(self.global_connections)
+
+        for connection in connections:
+            await self.send_message(connection, message)
+
+
+# 使用优化的连接管理器
+ws_manager = OptimizedConnectionManager()

@@ -40,7 +40,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Pointer',
       description: '点击页面元素',
       category: 'interaction',
-      config: { selector: '', byImage: false, templatePath: '', offsetX: 0, offsetY: 0 }
+      config: { selector: '', selectorType: 'css', byImage: false, templatePath: '', offsetX: 0, offsetY: 0 }
     },
     {
       id: 'input-1',
@@ -49,7 +49,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Edit',
       description: '输入文本内容',
       category: 'interaction',
-      config: { selector: '', value: '', clear: true }
+      config: { selector: '', selectorType: 'css', value: '', clear: true }
     },
     {
       id: 'wait-1',
@@ -67,7 +67,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'View',
       description: '等待元素出现或消失',
       category: 'interaction',
-      config: { selector: '', state: 'present', timeout: 10000 }
+      config: { selector: '', selectorType: 'css', state: 'present', timeout: 10000 }
     },
     {
       id: 'scroll-1',
@@ -76,7 +76,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Bottom',
       description: '滚动页面到指定位置',
       category: 'interaction',
-      config: { direction: 'down', amount: 500, selector: '' }
+      config: { direction: 'down', amount: 500, selector: '', selectorType: 'css' }
     },
     {
       id: 'screenshot-1',
@@ -85,7 +85,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Picture',
       description: '截取页面或元素截图',
       category: 'extraction',
-      config: { fullPage: false, selector: '', path: '' }
+      config: { fullPage: false, selector: '', selectorType: 'css', path: '' }
     },
     {
       id: 'extract-1',
@@ -130,7 +130,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Pointer',
       description: '鼠标悬停在元素上',
       category: 'interaction',
-      config: { selector: '' }
+      config: { selector: '', selectorType: 'css' }
     },
     {
       id: 'drag-1',
@@ -139,7 +139,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Rank',
       description: '拖拽元素到目标位置',
       category: 'interaction',
-      config: { sourceSelector: '', targetSelector: '', targetX: 0, targetY: 0 }
+      config: { sourceSelector: '', sourceSelectorType: 'css', targetSelector: '', targetSelectorType: 'css', targetX: 0, targetY: 0 }
     },
     {
       id: 'keyboard-1',
@@ -184,7 +184,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Menu',
       description: '切换到指定iframe框架',
       category: 'browser',
-      config: { selector: '', index: -1 }
+      config: { selector: '', selectorType: 'css', index: -1 }
     },
     {
       id: 'download-1',
@@ -193,7 +193,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Download',
       description: '点击下载文件',
       category: 'file',
-      config: { selector: '', savePath: '', url: '' }
+      config: { selector: '', selectorType: 'css', savePath: '', url: '' }
     },
     {
       id: 'upload-1',
@@ -202,7 +202,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Upload',
       description: '上传文件到input元素',
       category: 'file',
-      config: { selector: '', filePaths: [] }
+      config: { selector: '', selectorType: 'css', filePaths: [] }
     },
     {
       id: 'js-1',
@@ -229,7 +229,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Refresh',
       description: '循环执行一段操作',
       category: 'control',
-      config: { type: 'times', selector: '', times: 10, selectorList: [] }
+      config: { type: 'times', selector: '', selectorType: 'css', times: 10, selectorList: [] }
     },
     {
       id: 'break-1',

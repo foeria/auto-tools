@@ -92,7 +92,7 @@ const {
 } = useNodeSearch(workflowNodes)
 
 // WebSocket连接状态管理
-let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
+// 注意：WebSocket重连逻辑已由wsService内部处理
 
 // 等待WebSocket连接建立的辅助函数
 async function waitForConnection(timeout = 5000): Promise<boolean> {
@@ -355,17 +355,18 @@ async function saveWorkflow() {
 
 async function doSaveWorkflow() {
   try {
-    await ElMessageBox.confirm('确定要保存当前工作流吗？', '确认保存', {       
+    await ElMessageBox.confirm('确定要保存当前工作流吗？', '确认保存', {
       confirmButtonText: '保存',
       cancelButtonText: '取消'
     })
-    
+
     const actions = workflowNodes.value.map(node => {
       const nodeData = node.data as ActionNode & { id: string }
       return {
         type: nodeData.type,
         id: nodeData.id,
         selector: nodeData.config?.selector || '',
+        selector_type: nodeData.config?.selectorType || 'css',
         value: nodeData.config?.value || '',
         url: nodeData.config?.url || '',
         timeout: nodeData.config?.timeout || 5000,
@@ -461,6 +462,7 @@ async function confirmRun() {
         type: nodeData.type,
         id: nodeData.id,
         selector: nodeData.config?.selector || '',
+        selector_type: nodeData.config?.selectorType || 'css',
         value: nodeData.config?.value || '',
         url: nodeData.config?.url || '',
         timeout: nodeData.config?.timeout || 5000,

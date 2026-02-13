@@ -5,6 +5,7 @@ import type { ActionNode } from '@/stores/workflow'
 
 interface Condition {
   selector: string
+  selectorType: string
   operator: 'exists' | 'not_exists' | 'equals' | 'not_equals' | 'contains' | 'not_contains' | 'greater' | 'less'
   value: string
 }
@@ -30,6 +31,17 @@ const getCategoryName = (category: string): string => {
   return names[category] || category
 }
 
+function getSelectorPlaceholder(selectorType: string): string {
+  const placeholders: Record<string, string> = {
+    css: '如: #search-input 或 .form-control input',
+    xpath: '如: //input[@id="search"] 或 //div[@class="container"]//input',
+    id: '如: search-input 或 username (不带#前缀)',
+    name: '如: search_query 或 user[email]',
+    class: '如: form-control 或 btn btn-primary'
+  }
+  return placeholders[selectorType] || '输入选择器'
+}
+
 function copyNodeId() {
   if (props.node) {
     navigator.clipboard.writeText(props.node.id)
@@ -44,6 +56,7 @@ function addCondition() {
     }
     props.node.config.conditions.push({
       selector: '',
+      selectorType: 'css',
       operator: 'exists',
       value: ''
     } as Condition)
@@ -61,7 +74,7 @@ function addSelector() {
     if (!props.node.config.selectors) {
       props.node.config.selectors = []
     }
-    props.node.config.selectors.push({ name: '', selector: '', extractType: 'text', attribute: '' })
+    props.node.config.selectors.push({ name: '', selector: '', selectorType: 'css', extractType: 'text', attribute: '' })
   }
 }
 
@@ -130,8 +143,17 @@ function removeSelector(index: number) {
       </template>
       
       <template v-else-if="node.type === 'click'">
+        <el-form-item label="选择器类型">
+          <el-select v-model="node.config.selectorType" style="width: 100%">
+            <el-option label="CSS选择器" value="css" />
+            <el-option label="XPath选择器" value="xpath" />
+            <el-option label="ID选择器" value="id" />
+            <el-option label="Name属性" value="name" />
+            <el-option label="Class选择器" value="class" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="选择器">
-          <el-input v-model="node.config.selector" placeholder="#submit-btn" />
+          <el-input v-model="node.config.selector" :placeholder="getSelectorPlaceholder(node.config.selectorType)" />
         </el-form-item>
         <el-form-item label="点击方式">
           <el-select v-model="node.config.clickType" style="width: 100%">
@@ -157,8 +179,17 @@ function removeSelector(index: number) {
       </template>
       
       <template v-else-if="node.type === 'input'">
+        <el-form-item label="选择器类型">
+          <el-select v-model="node.config.selectorType" style="width: 100%">
+            <el-option label="CSS选择器" value="css" />
+            <el-option label="XPath选择器" value="xpath" />
+            <el-option label="ID选择器" value="id" />
+            <el-option label="Name属性" value="name" />
+            <el-option label="Class选择器" value="class" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="选择器">
-          <el-input v-model="node.config.selector" placeholder="#search-input" />
+          <el-input v-model="node.config.selector" :placeholder="getSelectorPlaceholder(node.config.selectorType)" />
         </el-form-item>
         <el-form-item label="内容">
           <el-input v-model="node.config.value" placeholder="要输入的内容" />
@@ -181,8 +212,17 @@ function removeSelector(index: number) {
       </template>
       
       <template v-else-if="node.type === 'wait_element'">
+        <el-form-item label="选择器类型">
+          <el-select v-model="node.config.selectorType" style="width: 100%">
+            <el-option label="CSS选择器" value="css" />
+            <el-option label="XPath选择器" value="xpath" />
+            <el-option label="ID选择器" value="id" />
+            <el-option label="Name属性" value="name" />
+            <el-option label="Class选择器" value="class" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="选择器">
-          <el-input v-model="node.config.selector" placeholder=".element" />
+          <el-input v-model="node.config.selector" :placeholder="getSelectorPlaceholder(node.config.selectorType)" />
         </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="node.config.state">
@@ -223,8 +263,17 @@ function removeSelector(index: number) {
           </el-select>
         </el-form-item>
         <template v-if="node.config.screenshotType === 'selector'">
+          <el-form-item label="选择器类型">
+            <el-select v-model="node.config.selectorType" style="width: 100%">
+              <el-option label="CSS选择器" value="css" />
+              <el-option label="XPath选择器" value="xpath" />
+              <el-option label="ID选择器" value="id" />
+              <el-option label="Name属性" value="name" />
+              <el-option label="Class选择器" value="class" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="元素选择器">
-            <el-input v-model="node.config.selector" placeholder="#element" />
+            <el-input v-model="node.config.selector" :placeholder="getSelectorPlaceholder(node.config.selectorType)" />
           </el-form-item>
         </template>
         <el-form-item label="保存路径">
@@ -236,14 +285,21 @@ function removeSelector(index: number) {
         <el-form-item label="提取规则">
           <div class="selector-list">
             <div v-for="(sel, index) in node.config.selectors" :key="index" class="selector-item">
-              <el-input v-model="sel.name" placeholder="字段名" style="width: 80px" />
-              <el-input v-model="sel.selector" placeholder="CSS选择器" style="flex: 1" />
-              <el-select v-model="sel.extractType" style="width: 90px">
+              <el-input v-model="sel.name" placeholder="字段名" style="width: 70px" />
+              <el-select v-model="sel.selectorType" style="width: 90px">
+                <el-option label="CSS" value="css" />
+                <el-option label="XPath" value="xpath" />
+                <el-option label="ID" value="id" />
+                <el-option label="Name" value="name" />
+                <el-option label="Class" value="class" />
+              </el-select>
+              <el-input v-model="sel.selector" :placeholder="getSelectorPlaceholder(sel.selectorType)" style="flex: 1" />
+              <el-select v-model="sel.extractType" style="width: 80px">
                 <el-option label="文本" value="text" />
                 <el-option label="HTML" value="html" />
                 <el-option label="属性" value="attribute" />
               </el-select>
-              <el-input v-model="sel.attribute" placeholder="属性名" style="width: 80px" v-if="sel.extractType === 'attribute'" />
+              <el-input v-model="sel.attribute" placeholder="属性" style="width: 60px" v-if="sel.extractType === 'attribute'" />
               <el-button type="danger" :icon="'Delete'" size="small" @click="removeSelector(index)" />
             </div>
             <el-button type="primary" size="small" @click="addSelector" style="width: 100%; margin-top: 8px">
@@ -345,8 +401,17 @@ function removeSelector(index: number) {
       </template>
       
       <template v-else-if="node.type === 'hover'">
+        <el-form-item label="选择器类型">
+          <el-select v-model="node.config.selectorType" style="width: 100%">
+            <el-option label="CSS选择器" value="css" />
+            <el-option label="XPath选择器" value="xpath" />
+            <el-option label="ID选择器" value="id" />
+            <el-option label="Name属性" value="name" />
+            <el-option label="Class选择器" value="class" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="选择器">
-          <el-input v-model="node.config.selector" placeholder="#element" />
+          <el-input v-model="node.config.selector" :placeholder="getSelectorPlaceholder(node.config.selectorType)" />
         </el-form-item>
         <el-form-item label="偏移X">
           <el-input-number v-model="node.config.offsetX" :min="-1000" :max="1000" style="width: 100%" />
@@ -360,11 +425,29 @@ function removeSelector(index: number) {
       </template>
       
       <template v-else-if="node.type === 'drag'">
+        <el-form-item label="源元素选择器类型">
+          <el-select v-model="node.config.sourceSelectorType" style="width: 100%">
+            <el-option label="CSS选择器" value="css" />
+            <el-option label="XPath选择器" value="xpath" />
+            <el-option label="ID选择器" value="id" />
+            <el-option label="Name属性" value="name" />
+            <el-option label="Class选择器" value="class" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="源元素选择器">
-          <el-input v-model="node.config.sourceSelector" placeholder="#draggable" />
+          <el-input v-model="node.config.sourceSelector" :placeholder="getSelectorPlaceholder(node.config.sourceSelectorType)" />
+        </el-form-item>
+        <el-form-item label="目标元素选择器类型">
+          <el-select v-model="node.config.targetSelectorType" style="width: 100%">
+            <el-option label="CSS选择器" value="css" />
+            <el-option label="XPath选择器" value="xpath" />
+            <el-option label="ID选择器" value="id" />
+            <el-option label="Name属性" value="name" />
+            <el-option label="Class选择器" value="class" />
+          </el-select>
         </el-form-item>
         <el-form-item label="目标元素选择器">
-          <el-input v-model="node.config.targetSelector" placeholder="#droppable" />
+          <el-input v-model="node.config.targetSelector" :placeholder="getSelectorPlaceholder(node.config.targetSelectorType)" />
         </el-form-item>
         <template v-if="!node.config.targetSelector">
           <el-form-item label="目标坐标">
@@ -434,8 +517,15 @@ function removeSelector(index: number) {
         <el-form-item label="条件列表">
           <div class="condition-list">
             <div v-for="(cond, index) in node.config.conditions" :key="index" class="condition-item">
-              <el-input v-model="cond.selector" placeholder="选择器" style="flex: 2" />
-              <el-select v-model="cond.operator" style="width: 110px">
+              <el-select v-model="cond.selectorType" style="width: 100px">
+                <el-option label="CSS" value="css" />
+                <el-option label="XPath" value="xpath" />
+                <el-option label="ID" value="id" />
+                <el-option label="Name" value="name" />
+                <el-option label="Class" value="class" />
+              </el-select>
+              <el-input v-model="cond.selector" :placeholder="getSelectorPlaceholder(cond.selectorType)" style="flex: 1" />
+              <el-select v-model="cond.operator" style="width: 100px">
                 <el-option label="存在" value="exists" />
                 <el-option label="不存在" value="not_exists" />
                 <el-option label="等于" value="equals" />
@@ -443,7 +533,7 @@ function removeSelector(index: number) {
                 <el-option label="包含" value="contains" />
                 <el-option label="不包含" value="not_contains" />
               </el-select>
-              <el-input v-model="cond.value" placeholder="比较值" style="flex: 1" />
+              <el-input v-model="cond.value" placeholder="比较值" style="width: 80px" />
               <el-button type="danger" :icon="'Delete'" size="small" @click="removeCondition(index)" />
             </div>
             <el-button type="primary" size="small" @click="addCondition" style="width: 100%; margin-top: 8px">
@@ -468,8 +558,17 @@ function removeSelector(index: number) {
           </el-form-item>
         </template>
         <template v-if="node.config.type === 'selector'">
+          <el-form-item label="选择器类型">
+            <el-select v-model="node.config.selectorType" style="width: 100%">
+              <el-option label="CSS选择器" value="css" />
+              <el-option label="XPath选择器" value="xpath" />
+              <el-option label="ID选择器" value="id" />
+              <el-option label="Name属性" value="name" />
+              <el-option label="Class选择器" value="class" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="元素选择器">
-            <el-input v-model="node.config.selector" placeholder=".list-item" />
+            <el-input v-model="node.config.selector" :placeholder="getSelectorPlaceholder(node.config.selectorType)" />
           </el-form-item>
           <el-form-item label="保存列表到变量">
             <el-input v-model="node.config.variableName" placeholder="items" />
@@ -554,15 +653,33 @@ function removeSelector(index: number) {
           </el-select>
         </el-form-item>
         <template v-if="node.config.action === 'selector'">
+          <el-form-item label="选择器类型">
+            <el-select v-model="node.config.selectorType" style="width: 100%">
+              <el-option label="CSS选择器" value="css" />
+              <el-option label="XPath选择器" value="xpath" />
+              <el-option label="ID选择器" value="id" />
+              <el-option label="Name属性" value="name" />
+              <el-option label="Class选择器" value="class" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="iframe选择器">
-            <el-input v-model="node.config.selector" placeholder="iframe" />
+            <el-input v-model="node.config.selector" :placeholder="getSelectorPlaceholder(node.config.selectorType)" />
           </el-form-item>
         </template>
       </template>
       
       <template v-else-if="node.type === 'download'">
+        <el-form-item label="选择器类型">
+          <el-select v-model="node.config.selectorType" style="width: 100%">
+            <el-option label="CSS选择器" value="css" />
+            <el-option label="XPath选择器" value="xpath" />
+            <el-option label="ID选择器" value="id" />
+            <el-option label="Name属性" value="name" />
+            <el-option label="Class选择器" value="class" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="选择器">
-          <el-input v-model="node.config.selector" placeholder="#download-btn" />
+          <el-input v-model="node.config.selector" :placeholder="getSelectorPlaceholder(node.config.selectorType)" />
         </el-form-item>
         <el-form-item label="保存路径">
           <el-input v-model="node.config.savePath" placeholder="./downloads" />
@@ -576,8 +693,17 @@ function removeSelector(index: number) {
       </template>
       
       <template v-else-if="node.type === 'upload'">
+        <el-form-item label="选择器类型">
+          <el-select v-model="node.config.selectorType" style="width: 100%">
+            <el-option label="CSS选择器" value="css" />
+            <el-option label="XPath选择器" value="xpath" />
+            <el-option label="ID选择器" value="id" />
+            <el-option label="Name属性" value="name" />
+            <el-option label="Class选择器" value="class" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="选择器">
-          <el-input v-model="node.config.selector" placeholder="input[type=file]" />
+          <el-input v-model="node.config.selector" :placeholder="getSelectorPlaceholder(node.config.selectorType)" />
         </el-form-item>
         <el-form-item label="文件路径">
           <el-input v-model="node.config.filePaths" type="textarea" :rows="3" placeholder="每行一个文件路径" />

@@ -50,18 +50,41 @@ export interface TaskScreenshotPayload {
   timestamp: string
 }
 
+// WebSocket配置（可从后端config.yaml同步）
+interface WebSocketConfig {
+  pingInterval: number      // 心跳间隔 (ms) - 对应 config.websocket.ping_interval
+  pongTimeout: number       // Pong超时 (ms) - 对应 config.websocket.pong_timeout
+  maxReconnectAttempts: number  // 最大重连次数 - 对应 config.websocket.max_reconnect_attempts
+  reconnectDelayBase: number    // 重连延迟基数 (ms) - 对应 config.websocket.reconnect_delay_base
+}
+
 class WebSocketService {
   private ws: WebSocket | null = null
   private url: string = ''
-  private reconnectInterval: number = 3000
-  private maxReconnectAttempts: number = 5
+  private config: WebSocketConfig = {
+    pingInterval: 30000,          // 30秒
+    pongTimeout: 10000,          // 10秒
+    maxReconnectAttempts: 5,      // 最多5次
+    reconnectDelayBase: 3000      // 3秒基数
+  }
   private reconnectAttempts: number = 0
   private messageHandlers: Map<string, Set<(data: unknown) => void>> = new Map()
   private isConnecting: boolean = false
+  private heartbeatInterval: number | null = null
+  private pongTimeout: number | null = null
+  private lastPongTime: number = 0
 
   public connected = ref(false)
   public connectionError = ref<string | null>(null)
   public lastMessage = ref<WebSocketMessage | null>(null)
+
+  /**
+   * 更新WebSocket配置
+   * @param config - 部分配置对象，会与现有配置合并
+   */
+  updateConfig(config: Partial<WebSocketConfig>): void {
+    this.config = { ...this.config, ...config }
+  }
 
   connect(url: string = (import.meta.env.VITE_WS_URL || 'ws://localhost:8000') + '/ws/tasks'): void {
     if (this.ws?.readyState === WebSocket.OPEN || this.isConnecting) {
@@ -81,12 +104,21 @@ class WebSocketService {
         this.isConnecting = false
         this.reconnectAttempts = 0
         this.connectionError.value = null
+        this.startHeartbeat()
       }
 
       this.ws.onmessage = (event) => {
         try {
           const message: WebSocketMessage = JSON.parse(event.data)
           this.lastMessage.value = message
+
+          // 处理心跳响应
+          if (message.type === 'pong') {
+            this.lastPongTime = Date.now()
+            this.clearPongTimeout()
+            return
+          }
+
           this.dispatchMessage(message)
         } catch (e) {
           console.error('[WebSocket] Failed to parse message:', e)
@@ -97,6 +129,7 @@ class WebSocketService {
         console.log('[WebSocket] Disconnected:', event.code, event.reason)
         this.connected.value = false
         this.isConnecting = false
+        this.stopHeartbeat()
 
         if (!event.wasClean) {
           this.scheduleReconnect()
@@ -116,15 +149,75 @@ class WebSocketService {
     }
   }
 
+  // 启动心跳
+  private startHeartbeat(): void {
+    this.stopHeartbeat()
+    this.lastPongTime = Date.now()
+
+    // 发送ping
+    this.send({ type: 'ping' })
+
+    // 设置pong超时检测 (使用配置)
+    this.pongTimeout = window.setTimeout(() => {
+      if (Date.now() - this.lastPongTime > this.config.pongTimeout) {
+        console.warn('[WebSocket] Pong timeout, reconnecting...')
+        this.handleConnectionLost()
+      }
+    }, this.config.pongTimeout)
+
+    // 定期发送心跳 (使用配置)
+    this.heartbeatInterval = window.setInterval(() => {
+      if (this.connected.value) {
+        this.send({ type: 'ping' })
+        this.pongTimeout = window.setTimeout(() => {
+          if (Date.now() - this.lastPongTime > this.config.pongTimeout) {
+            console.warn('[WebSocket] Pong timeout, reconnecting...')
+            this.handleConnectionLost()
+          }
+        }, this.config.pongTimeout)
+      }
+    }, this.config.pingInterval)
+  }
+
+  // 停止心跳
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval !== null) {
+      clearInterval(this.heartbeatInterval)
+      this.heartbeatInterval = null
+    }
+    this.clearPongTimeout()
+  }
+
+  private clearPongTimeout(): void {
+    if (this.pongTimeout !== null) {
+      clearTimeout(this.pongTimeout)
+      this.pongTimeout = null
+    }
+  }
+
+  // 处理连接丢失
+  private handleConnectionLost(): void {
+    this.stopHeartbeat()
+    if (this.ws) {
+      this.ws.close(1001, 'Connection lost')
+      this.ws = null
+    }
+    this.scheduleReconnect()
+  }
+
   private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+    if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
       console.error('[WebSocket] Max reconnect attempts reached')
       this.connectionError.value = 'Failed to reconnect after multiple attempts'
       return
     }
 
     this.reconnectAttempts++
-    const delay = this.reconnectInterval * this.reconnectAttempts
+    // 使用指数退避计算重连延迟
+    const delay = Math.min(
+      this.config.reconnectDelayBase * Math.pow(2, this.reconnectAttempts - 1),
+      30000  // 最大30秒
+    )
     console.log(`[WebSocket] Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay}ms`)
 
     setTimeout(() => {

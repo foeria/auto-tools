@@ -278,6 +278,58 @@ class SQLiteStorage:
         finally:
             conn.close()
 
+    def list_task_history(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+        status: str = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """获取任务历史记录（按时间范围筛选）"""
+        conn = self._get_connection()
+        try:
+            query = 'SELECT * FROM tasks WHERE 1=1'
+            params = []
+
+            if start_date:
+                query += ' AND created_at >= ?'
+                params.append(start_date)
+            if end_date:
+                query += ' AND created_at <= ?'
+                params.append(end_date)
+            if status:
+                query += ' AND status = ?'
+                params.append(status)
+
+            query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+            params.extend([limit, offset])
+
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_task_duration(self, task_id: str) -> Optional[float]:
+        """获取任务执行时长（秒）"""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                'SELECT started_at, completed_at FROM tasks WHERE id = ?',
+                (task_id,)
+            ).fetchone()
+            if row and row['started_at'] and row['completed_at']:
+                start = datetime.fromisoformat(row['started_at'])
+                end = datetime.fromisoformat(row['completed_at'])
+                return (end - start).total_seconds()
+            return None
+        finally:
+            conn.close()
+
+    def get_recent_tasks(self, count: int = 10) -> List[Dict[str, Any]]:
+        """获取最近的任务列表"""
+        return self.list_tasks(limit=count, skip=0)
+
 
 class InMemoryQueue:
     """内存任务队列 - 轻量级替代 Redis"""
