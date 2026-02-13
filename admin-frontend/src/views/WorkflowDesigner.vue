@@ -11,7 +11,7 @@ import WorkflowEdge from '@/components/workflow/WorkflowEdge.vue'
 import NodeConfigPanel from '@/components/workflow/NodeConfigPanel.vue'
 import ExecutionMonitor from '@/components/ExecutionMonitor.vue'
 import { useWorkflowStore, type ActionNode } from '@/stores/workflow'
-import { taskApi } from '@/services/api'
+import { taskApi, workflowApi } from '@/services/api'
 import { useWebSocket, wsService } from '@/services/websocket'
 import { useWorkflowValidation } from '@/composables/useWorkflowValidation'
 import { useNodeSearch } from '@/composables/useNodeSearch'
@@ -107,23 +107,36 @@ async function waitForConnection(timeout = 5000): Promise<boolean> {
 }
 
 // 从URL参数加载工作流
-onMounted(() => {
+onMounted(async () => {
   const workflowIdFromQuery = route.query.workflowId as string
   const templateIdFromQuery = route.query.templateId as string
 
   if (workflowIdFromQuery) {
-    // 从localStorage加载指定的工作流
+    // 优先从后端加载
+    try {
+      const response = await workflowApi.get(workflowIdFromQuery)
+      if (response.data) {
+        loadWorkflowData(response.data)
+        ElMessage.success(`已加载工作流: ${response.data.name}（来自服务器）`)
+        router.replace({ query: {} })
+        return
+      }
+    } catch (e) {
+      console.warn('无法从后端加载工作流，尝试本地存储:', e)
+    }
+
+    // 回退到localStorage
     const storedData = localStorage.getItem(`workflow_${workflowIdFromQuery}`)
     if (storedData) {
       try {
         const data = JSON.parse(storedData)
         loadWorkflowData(data)
-        ElMessage.success(`已加载工作流: ${data.name}`)
-        // 清除URL参数，防止刷新时重复加载
+        ElMessage.success(`已加载工作流: ${data.name}（来自本地存储）`)
         router.replace({ query: {} })
       } catch (e) {
         console.error('加载工作流失败:', e)
         ElMessage.error('加载工作流失败')
+        router.replace({ query: {} })
       }
     } else {
       ElMessage.warning('工作流不存在或已被删除')
@@ -382,6 +395,7 @@ async function doSaveWorkflow() {
         direction: nodeData.config?.direction || 'down',
         amount: nodeData.config?.amount || 500,
         fullPage: nodeData.config?.fullPage || false,
+        screenshotType: nodeData.config?.screenshotType || 'viewport',
         savePath: nodeData.config?.savePath || '',
         imagePath: nodeData.config?.imagePath || '',
         threshold: nodeData.config?.threshold || 0.8,
@@ -402,23 +416,53 @@ async function doSaveWorkflow() {
         index: nodeData.config?.index || 0
       }
     })
-    
+
     const workflowData = {
-      id: workflowId.value || `workflow-${Date.now()}`,
       name: workflowName.value || `未命名工作流-${new Date().toLocaleDateString()}`,
+      description: '',
       nodes: workflowNodes.value,
       edges: workflowEdges.value,
       actions: actions,
-      created_at: new Date().toISOString()
+      url_pattern: ''
     }
-    
-    localStorage.setItem(`workflow_${workflowData.id}`, JSON.stringify(workflowData))
-    
-    if (!workflowId.value) {
-      workflowId.value = workflowData.id
+
+    try {
+      // 判断是新建还是更新
+      let response
+      if (workflowId.value) {
+        // 已存在workflowId，执行更新
+        response = await workflowApi.update(workflowId.value, workflowData)
+        ElMessage.success(`工作流 "${workflowData.name}" 更新成功（已同步到服务器）`)
+      } else {
+        // 不存在workflowId，执行新建
+        response = await workflowApi.create(workflowData)
+        // 更新本地ID
+        if (response.data?.id) {
+          workflowId.value = response.data.id
+        }
+        ElMessage.success(`工作流 "${workflowData.name}" 保存成功（已同步到服务器）`)
+      }
+      // 刷新工作流列表
+      loadSavedWorkflows()
+    } catch (backendError: any) {
+      // 后端保存失败，降级到localStorage
+      console.warn('后端保存失败，降级到localStorage:', backendError)
+      const localId = workflowId.value || `workflow-${Date.now()}`
+      const localWorkflowData = {
+        id: localId,
+        name: workflowName.value || `未命名工作流-${new Date().toLocaleDateString()}`,
+        nodes: workflowNodes.value,
+        edges: workflowEdges.value,
+        actions: actions,
+        created_at: new Date().toISOString()
+      }
+      localStorage.setItem(`workflow_${localId}`, JSON.stringify(localWorkflowData))
+      if (!workflowId.value) {
+        workflowId.value = localId
+      }
+      ElMessage.success(`工作流 "${localWorkflowData.name}" 已保存到本地存储`)
+      loadSavedWorkflows()
     }
-    
-    ElMessage.success(`工作流 "${workflowData.name}" 保存成功`)
   } catch {
     ElMessage.info('取消保存')
   }
@@ -478,6 +522,7 @@ async function confirmRun() {
         direction: nodeData.config?.direction || 'down',
         amount: nodeData.config?.amount || 500,
         fullPage: nodeData.config?.fullPage || false,
+        screenshotType: nodeData.config?.screenshotType || 'viewport',
         savePath: nodeData.config?.savePath || '',
         imagePath: nodeData.config?.imagePath || '',
         threshold: nodeData.config?.threshold || 0.8,
@@ -611,25 +656,54 @@ function onKeyDown(event: KeyboardEvent) {
 }
 
 async function loadSavedWorkflows() {
-  const workflows: Array<{ id: string; name: string; created_at: string }> = []
+  const workflows: Array<{ id: string; name: string; created_at: string; source: 'server' | 'local' }> = []
+
+  // 尝试从后端加载
+  try {
+    const response = await workflowApi.list()
+    if (response.data && Array.isArray(response.data)) {
+      for (const wf of response.data) {
+        workflows.push({
+          id: wf.id,
+          name: wf.name,
+          created_at: wf.created_at || wf.updated_at || '',
+          source: 'server'
+        })
+      }
+    }
+  } catch (e) {
+    console.warn('无法从后端加载工作流列表:', e)
+  }
+
+  // 从localStorage加载（兼容旧数据）
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
     if (key?.startsWith('workflow_')) {
       try {
         const data = JSON.parse(localStorage.getItem(key) || '{}')
-        workflows.push({
-          id: data.id,
-          name: data.name || '未命名',
-          created_at: data.created_at || ''
-        })
+        // 避免重复添加已从服务器加载的工作流
+        if (!workflows.find(w => w.id === data.id)) {
+          workflows.push({
+            id: data.id,
+            name: data.name || '未命名',
+            created_at: data.created_at || '',
+            source: 'local'
+          })
+        }
       } catch (e) {
         console.error('Failed to parse workflow:', e)
       }
     }
   }
-  savedWorkflows.value = workflows.sort((a, b) => 
-    new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-  )
+
+  // 按时间排序（服务器优先）
+  savedWorkflows.value = workflows.sort((a, b) => {
+    // 服务器数据优先
+    if (a.source !== b.source) {
+      return a.source === 'server' ? -1 : 1
+    }
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  })
 }
 
 function showSaveDialog() {
@@ -644,13 +718,32 @@ function showLoadDialog() {
   loadDialogVisible.value = true
 }
 
-function loadWorkflow(id: string) {
+async function loadWorkflow(id: string) {
+  // 优先尝试从后端加载
+  try {
+    const response = await workflowApi.get(id)
+    if (response.data) {
+      const data = response.data
+      workflowNodes.value = data.nodes || []
+      workflowEdges.value = data.edges || []
+      workflowId.value = data.id || null
+      workflowName.value = data.name || ''
+      selectedNode.value = null
+      loadDialogVisible.value = false
+      ElMessage.success(`已加载工作流: ${data.name}（来自服务器）`)
+      return
+    }
+  } catch (e) {
+    console.warn('无法从后端加载工作流，尝试本地存储:', e)
+  }
+
+  // 回退到localStorage
   const dataStr = localStorage.getItem(`workflow_${id}`)
   if (!dataStr) {
     ElMessage.error('工作流数据不存在')
     return
   }
-  
+
   try {
     const data = JSON.parse(dataStr)
     workflowNodes.value = data.nodes || []
@@ -659,7 +752,7 @@ function loadWorkflow(id: string) {
     workflowName.value = data.name || ''
     selectedNode.value = null
     loadDialogVisible.value = false
-    ElMessage.success(`已加载工作流: ${data.name}`)
+    ElMessage.success(`已加载工作流: ${data.name}（来自本地存储）`)
   } catch (e) {
     console.error('Failed to load workflow:', e)
     ElMessage.error('加载工作流失败')
@@ -680,7 +773,15 @@ function formatDate(dateStr: string): string {
   }
 }
 
-function deleteSavedWorkflow(id: string) {
+async function deleteSavedWorkflow(id: string) {
+  try {
+    // 尝试从后端删除
+    await workflowApi.delete(id)
+  } catch (e) {
+    console.warn('无法从后端删除工作流:', e)
+  }
+
+  // 从localStorage删除（如果存在）
   localStorage.removeItem(`workflow_${id}`)
   loadSavedWorkflows()
   ElMessage.success('工作流已删除')
@@ -1088,15 +1189,22 @@ function exportWorkflow() {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="loadDialogVisible" title="加载工作流" width="500px">
+    <el-dialog v-model="loadDialogVisible" title="加载工作流" width="550px">
       <el-table :data="savedWorkflows" style="width: 100%" max-height="400">
+        <el-table-column label="来源" width="80" align="center">
+          <template #default="{ row }">
+            <el-tag :type="row.source === 'server' ? 'success' : 'info'" size="small">
+              {{ row.source === 'server' ? '服务器' : '本地' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="name" label="工作流名称" min-width="150" />
         <el-table-column label="创建时间" min-width="150">
           <template #default="{ row }">
             {{ formatDate(row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" align="center">
+        <el-table-column label="操作" width="120" align="center">
           <template #default="{ row }">
             <el-button type="primary" size="small" @click="loadWorkflow(row.id)">加载</el-button>
             <el-button type="danger" size="small" @click="deleteSavedWorkflow(row.id)">删除</el-button>

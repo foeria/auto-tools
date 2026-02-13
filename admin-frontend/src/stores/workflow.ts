@@ -85,7 +85,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       icon: 'Picture',
       description: '截取页面或元素截图',
       category: 'extraction',
-      config: { fullPage: false, selector: '', selectorType: 'css', path: '' }
+      config: { fullPage: false, selector: '', selectorType: 'css', screenshotType: 'viewport', savePath: './screenshots/screenshot.png' }
     },
     {
       id: 'extract-1',

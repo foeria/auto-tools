@@ -67,6 +67,7 @@ class TaskCreate(BaseModel):
     max_retries: int = Field(default=3, ge=0, le=10, description="最大重试次数")
     metadata: Dict[str, Any] = Field(default={}, description="元数据")
     headless: bool = Field(default=False, description="是否使用无头模式运行浏览器")
+    browser_config: Optional[Dict[str, Any]] = Field(default=None, description="浏览器反检测配置")
 
 
 class TaskResponse(BaseModel):
@@ -233,7 +234,8 @@ async def create_task(task_data: TaskCreate, background_tasks: BackgroundTasks):
         priority=task_data.priority,
         max_retries=task_data.max_retries,
         metadata=task_data.metadata,
-        headless=task_data.headless
+        headless=task_data.headless,
+        browser_config=task_data.browser_config
     )
 
     storage_manager.save_task_with_queue(task.to_dict(), task_data.priority)
@@ -344,22 +346,29 @@ async def get_task_status(task_id: str):
 
 @app.delete("/api/tasks/{task_id}", tags=["任务管理"])
 async def delete_task(task_id: str):
-    if task_id not in tasks_db:
-        error = ErrorHandler.create_task_error(
-            task_id=task_id,
-            error_code=ErrorCode.ERR_TASK_NOT_FOUND,
-            message="任务不存在",
-            reason=f"任务ID: {task_id}",
-            suggestion="请检查任务ID是否正确"
-        )
-        raise HTTPException(status_code=404, detail=error)
+    # 检查任务是否在待执行队列中
+    if task_id in tasks_db:
+        task = tasks_db[task_id]
+        task.status = TaskStatus.CANCELLED
+        del tasks_db[task_id]
+        return {"message": "任务已从队列中删除"}
 
-    task = tasks_db[task_id]
-    task.status = TaskStatus.CANCELLED
+    # 检查任务是否正在执行
+    from api_service.execution_engine import execution_engine
+    if task_id in execution_engine.executing_tasks:
+        # 标记任务为已取消，执行引擎会在下一次检查时停止
+        execution_engine.executing_tasks[task_id]["status"] = "cancelled"
+        return {"message": "任务正在取消中"}
 
-    del tasks_db[task_id]
-
-    return {"message": "任务已删除"}
+    # 任务不存在
+    error = ErrorHandler.create_task_error(
+        task_id=task_id,
+        error_code=ErrorCode.ERR_TASK_NOT_FOUND,
+        message="任务不存在",
+        reason=f"任务ID: {task_id}",
+        suggestion="请检查任务ID是否正确"
+    )
+    raise HTTPException(status_code=404, detail=error)
 
 
 @app.post("/api/tasks/{task_id}/retry", response_model=TaskResponse, tags=["任务管理"])
@@ -414,28 +423,10 @@ async def cancel_task(task_id: str):
     # 首先关闭浏览器（如果正在运行）
     if task_id in execution_engine.browser_contexts:
         try:
-            ctx = execution_engine.browser_contexts[task_id]
-            if isinstance(ctx, dict):
-                page = ctx.get("page")
-                browser = ctx.get("browser")
-                process = ctx.get("process")
-            else:
-                # 兼容旧版本的元组格式
-                page = ctx[1] if len(ctx) > 1 else None
-                browser = ctx[0] if len(ctx) > 0 else None
-                process = ctx[2] if len(ctx) > 2 else None
-
-            if page:
-                await page.close()
-            if browser:
+            browser = execution_engine.browser_contexts[task_id]
+            # browser_contexts 存储的是 SubprocessBrowser 对象
+            if hasattr(browser, 'close'):
                 await browser.close()
-            if process:
-                try:
-                    process.terminate()
-                    process.wait(timeout=5)
-                except Exception:
-                    process.kill()
-
             logger.info(f"Browser closed for cancelled task: {task_id}")
         except Exception as e:
             logger.error(f"Error closing browser during cancel: {e}")
@@ -449,6 +440,10 @@ async def cancel_task(task_id: str):
     # 从执行任务中移除（这会触发CancelledError）
     if task_id in execution_engine.executing_tasks:
         del execution_engine.executing_tasks[task_id]
+
+    # 从浏览器上下文中移除
+    if task_id in execution_engine.browser_contexts:
+        del execution_engine.browser_contexts[task_id]
 
     if task_id not in tasks_db:
         await ws_manager.send_task_status(
@@ -526,26 +521,10 @@ async def delete_tasks_batch(request: BatchTaskDelete):
                 del execution_engine.executing_tasks[task_id]
             if task_id in execution_engine.browser_contexts:
                 try:
-                    ctx = execution_engine.browser_contexts[task_id]
-                    if isinstance(ctx, dict):
-                        page = ctx.get("page")
-                        browser = ctx.get("browser")
-                        process = ctx.get("process")
-                    else:
-                        page = ctx[1] if len(ctx) > 1 else None
-                        browser = ctx[0] if len(ctx) > 0 else None
-                        process = ctx[2] if len(ctx) > 2 else None
-
-                    if page:
-                        await page.close()
-                    if browser:
+                    browser = execution_engine.browser_contexts[task_id]
+                    if hasattr(browser, 'close'):
                         await browser.close()
-                    if process:
-                        try:
-                            process.terminate()
-                            process.wait(timeout=5)
-                        except Exception:
-                            process.kill()
+                    del execution_engine.browser_contexts[task_id]
                 except Exception as e:
                     logger.error(f"Error closing browser during batch delete: {e}")
 
@@ -593,26 +572,10 @@ async def cancel_tasks_batch(request: BatchTaskCancel):
             # 关闭浏览器
             if task_id in execution_engine.browser_contexts:
                 try:
-                    ctx = execution_engine.browser_contexts[task_id]
-                    if isinstance(ctx, dict):
-                        page = ctx.get("page")
-                        browser = ctx.get("browser")
-                        process = ctx.get("process")
-                    else:
-                        page = ctx[1] if len(ctx) > 1 else None
-                        browser = ctx[0] if len(ctx) > 0 else None
-                        process = ctx[2] if len(ctx) > 2 else None
-
-                    if page:
-                        await page.close()
-                    if browser:
+                    browser = execution_engine.browser_contexts[task_id]
+                    if hasattr(browser, 'close'):
                         await browser.close()
-                    if process:
-                        try:
-                            process.terminate()
-                            process.wait(timeout=5)
-                        except Exception:
-                            process.kill()
+                    del execution_engine.browser_contexts[task_id]
                 except Exception as e:
                     logger.error(f"Error closing browser during batch cancel: {e}")
 
@@ -696,6 +659,145 @@ async def delete_template(template_id: str):
         raise HTTPException(status_code=404, detail=error)
 
     return {"message": "模板已删除"}
+
+
+# ============ 工作流API ============
+
+class WorkflowCreate(BaseModel):
+    id: Optional[str] = None
+    name: str
+    description: str = ""
+    nodes: List[Dict[str, Any]]
+    edges: List[Dict[str, Any]] = []
+    actions: List[Dict[str, Any]] = []
+    url_pattern: str = ""
+
+
+class WorkflowResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    nodes: List[Dict[str, Any]]
+    edges: List[Dict[str, Any]]
+    actions: List[Dict[str, Any]]
+    url_pattern: str
+    created_at: str
+    updated_at: str
+
+
+@app.get("/api/workflows", tags=["工作流管理"])
+async def list_workflows():
+    """列出所有工作流"""
+    workflows = storage_manager.db.list_workflows()
+    return {
+        "success": True,
+        "data": workflows,
+        "total": len(workflows)
+    }
+
+
+@app.get("/api/workflows/{workflow_id}", tags=["工作流管理"])
+async def get_workflow(workflow_id: str):
+    """获取工作流详情"""
+    workflow = storage_manager.db.get_workflow(workflow_id)
+
+    if not workflow:
+        error = {
+            "error_code": ErrorCode.ERR_TASK_NOT_FOUND.value,
+            "message": "工作流不存在",
+            "reason": f"工作流ID: {workflow_id}",
+            "suggestion": "请检查工作流ID是否正确"
+        }
+        raise HTTPException(status_code=404, detail=error)
+
+    return {
+        "success": True,
+        "data": workflow
+    }
+
+
+@app.post("/api/workflows", response_model=Dict, tags=["工作流管理"])
+async def create_workflow(workflow_data: WorkflowCreate):
+    """创建或更新工作流"""
+    workflow_id = workflow_data.id if workflow_data.id else str(uuid.uuid4())
+
+    workflow = {
+        'id': workflow_id,
+        'name': workflow_data.name,
+        'description': workflow_data.description,
+        'nodes': workflow_data.nodes,
+        'edges': workflow_data.edges,
+        'actions': workflow_data.actions,
+        'url_pattern': workflow_data.url_pattern,
+        'created_at': datetime.now().isoformat()
+    }
+
+    storage_manager.db.save_workflow(workflow)
+
+    logger.info(f"Workflow created/updated: {workflow_id}")
+
+    return {
+        "success": True,
+        "data": {
+            "id": workflow_id,
+            "name": workflow_data.name,
+            "message": "工作流保存成功"
+        }
+    }
+
+
+@app.put("/api/workflows/{workflow_id}", response_model=Dict, tags=["工作流管理"])
+async def update_workflow(workflow_id: str, workflow_data: WorkflowCreate):
+    """更新工作流"""
+    # 检查是否存在
+    existing = storage_manager.db.get_workflow(workflow_id)
+    if not existing:
+        error = {
+            "error_code": ErrorCode.ERR_TASK_NOT_FOUND.value,
+            "message": "工作流不存在",
+            "reason": f"工作流ID: {workflow_id}",
+            "suggestion": "请检查工作流ID是否正确"
+        }
+        raise HTTPException(status_code=404, detail=error)
+
+    workflow = {
+        'id': workflow_id,
+        'name': workflow_data.name,
+        'description': workflow_data.description,
+        'nodes': workflow_data.nodes,
+        'edges': workflow_data.edges,
+        'actions': workflow_data.actions,
+        'url_pattern': workflow_data.url_pattern,
+        'created_at': existing.get('created_at', datetime.now().isoformat())
+    }
+
+    storage_manager.db.save_workflow(workflow)
+
+    return {
+        "success": True,
+        "data": {
+            "id": workflow_id,
+            "name": workflow_data.name,
+            "message": "工作流更新成功"
+        }
+    }
+
+
+@app.delete("/api/workflows/{workflow_id}", tags=["工作流管理"])
+async def delete_workflow(workflow_id: str):
+    """删除工作流"""
+    success = storage_manager.db.delete_workflow(workflow_id)
+
+    if not success:
+        error = {
+            "error_code": ErrorCode.ERR_TASK_NOT_FOUND.value,
+            "message": "工作流不存在",
+            "reason": f"工作流ID: {workflow_id}",
+            "suggestion": "请检查工作流ID是否正确"
+        }
+        raise HTTPException(status_code=404, detail=error)
+
+    return {"success": True, "message": "工作流已删除"}
 
 
 @app.post("/api/forward", response_model=ForwardResponse, tags=["数据转发"])

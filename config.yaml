@@ -20,6 +20,13 @@ browser:
   screenshot_max_width: 1920
   # 启动超时时间 (秒)
   start_timeout: 10
+  # 反检测配置
+  enable_stealth: true
+  viewport_width: 1920
+  viewport_height: 1080
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  locale: "zh-CN"
+  timezone: "Asia/Shanghai"
 
 # 任务配置
 task:

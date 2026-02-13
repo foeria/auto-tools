@@ -25,6 +25,13 @@ class BrowserConfig:
     action_timeout: int = 5000
     screenshot_quality: int = 70
     start_timeout: int = 10
+    # 反检测配置
+    enable_stealth: bool = False
+    viewport_width: int = 1920
+    viewport_height: int = 1080
+    user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    locale: str = "zh-CN"
+    timezone: str = "Asia/Shanghai"
 
 
 @dataclass
@@ -149,6 +156,12 @@ class ConfigLoader:
                 action_timeout=browser_cfg.get('action_timeout', config.browser.action_timeout),
                 screenshot_quality=browser_cfg.get('screenshot_quality', config.browser.screenshot_quality),
                 start_timeout=browser_cfg.get('start_timeout', config.browser.start_timeout),
+                enable_stealth=browser_cfg.get('enable_stealth', config.browser.enable_stealth),
+                viewport_width=browser_cfg.get('viewport_width', config.browser.viewport_width),
+                viewport_height=browser_cfg.get('viewport_height', config.browser.viewport_height),
+                user_agent=browser_cfg.get('user_agent', config.browser.user_agent),
+                locale=browser_cfg.get('locale', config.browser.locale),
+                timezone=browser_cfg.get('timezone', config.browser.timezone),
             )
 
         # 任务配置

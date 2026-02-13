@@ -278,6 +278,9 @@ function removeSelector(index: number) {
         </template>
         <el-form-item label="保存路径">
           <el-input v-model="node.config.savePath" placeholder="./screenshots/page.png" />
+          <div style="color: #909399; font-size: 12px; margin-top: 4px;">
+            提示：输入完整路径如 D:/screenshots/page.png，图片将自动保存到本地
+          </div>
         </el-form-item>
       </template>
       

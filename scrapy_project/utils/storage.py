@@ -67,6 +67,21 @@ class SQLiteStorage:
                 )
             ''')
 
+            # 工作流表
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS workflows (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    nodes TEXT NOT NULL,
+                    edges TEXT,
+                    actions TEXT,
+                    url_pattern TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            ''')
+
             # 爬取数据表
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS crawled_data (
@@ -253,6 +268,81 @@ class SQLiteStorage:
         conn = self._get_connection()
         try:
             result = conn.execute('DELETE FROM templates WHERE id = ?', (template_id,))
+            conn.commit()
+            return result.rowcount > 0
+        finally:
+            conn.close()
+
+    # ============ 工作流相关方法 ============
+
+    def save_workflow(self, workflow: Dict[str, Any]) -> str:
+        """保存工作流"""
+        conn = self._get_connection()
+        try:
+            workflow['updated_at'] = datetime.now().isoformat()
+            conn.execute('''
+                INSERT OR REPLACE INTO workflows
+                (id, name, description, nodes, edges, actions, url_pattern, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                workflow['id'],
+                workflow['name'],
+                workflow.get('description', ''),
+                json.dumps(workflow.get('nodes', [])),
+                json.dumps(workflow.get('edges', [])),
+                json.dumps(workflow.get('actions', [])),
+                workflow.get('url_pattern', ''),
+                workflow.get('created_at') or datetime.now().isoformat(),
+                workflow['updated_at']
+            ))
+            conn.commit()
+            return workflow['id']
+        finally:
+            conn.close()
+
+    def get_workflow(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+        """获取工作流"""
+        conn = self._get_connection()
+        try:
+            row = conn.execute('SELECT * FROM workflows WHERE id = ?', (workflow_id,)).fetchone()
+            if row:
+                result = dict(row)
+                # 解析JSON字段
+                for field in ['nodes', 'edges', 'actions']:
+                    if result.get(field) and isinstance(result[field], str):
+                        try:
+                            result[field] = json.loads(result[field])
+                        except json.JSONDecodeError:
+                            result[field] = []
+                return result
+            return None
+        finally:
+            conn.close()
+
+    def list_workflows(self) -> List[Dict[str, Any]]:
+        """列出所有工作流"""
+        conn = self._get_connection()
+        try:
+            rows = conn.execute('SELECT * FROM workflows ORDER BY updated_at DESC').fetchall()
+            result = []
+            for row in rows:
+                result.append({
+                    'id': row['id'],
+                    'name': row['name'],
+                    'description': row['description'] or '',
+                    'url_pattern': row['url_pattern'] or '',
+                    'created_at': row['created_at'] or '',
+                    'updated_at': row['updated_at'] or ''
+                })
+            return result
+        finally:
+            conn.close()
+
+    def delete_workflow(self, workflow_id: str) -> bool:
+        """删除工作流"""
+        conn = self._get_connection()
+        try:
+            result = conn.execute('DELETE FROM workflows WHERE id = ?', (workflow_id,))
             conn.commit()
             return result.rowcount > 0
         finally:

@@ -324,8 +324,10 @@ class BatchLogManager:
 
     async def broadcast(self, message: WebSocketMessage, task_id: str = None):
         """广播消息（引用外部manager）"""
-        # 这个方法会在外部被设置
-        pass
+        # 动态获取 ws_manager 的广播方法
+        from api_service.websocket_manager import ws_manager
+        if hasattr(ws_manager, '_batch_broadcast'):
+            await ws_manager._batch_broadcast(message, task_id)
 
 
 # 创建批量日志管理器实例

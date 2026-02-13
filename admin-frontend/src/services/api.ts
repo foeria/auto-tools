@@ -225,6 +225,54 @@ export const templateApi = {
   }
 }
 
+export interface Workflow {
+  id?: string
+  name: string
+  description: string
+  nodes: any[]
+  edges: any[]
+  actions: any[]
+  url_pattern: string
+  created_at: string
+  updated_at?: string
+}
+
+export interface WorkflowSummary {
+  id: string
+  name: string
+  description: string
+  url_pattern: string
+  created_at: string
+  updated_at?: string
+}
+
+export const workflowApi = {
+  async list(): Promise<{ data: WorkflowSummary[]; total: number }> {
+    const response = await api.get('/api/workflows')
+    return response.data
+  },
+
+  async get(workflowId: string): Promise<{ data: Workflow }> {
+    const response = await api.get(`/api/workflows/${workflowId}`)
+    return response.data
+  },
+
+  async create(workflowData: Omit<Workflow, 'created_at' | 'updated_at'>): Promise<{ data: { id: string; name: string; message: string } }> {
+    const response = await api.post('/api/workflows', workflowData)
+    return response.data
+  },
+
+  async update(workflowId: string, workflowData: Omit<Workflow, 'id' | 'created_at' | 'updated_at'>): Promise<{ data: { id: string; name: string; message: string } }> {
+    const response = await api.put(`/api/workflows/${workflowId}`, workflowData)
+    return response.data
+  },
+
+  async delete(workflowId: string): Promise<{ success: boolean; message: string }> {
+    const response = await api.delete(`/api/workflows/${workflowId}`)
+    return response.data
+  }
+}
+
 export const dataApi = {
   async forward(data: any, targetUrl: string, headers?: Record<string, string>): Promise<{ success: boolean; status_code?: number; response?: any }> {
     const response = await api.post('/api/forward', { data, target_url: targetUrl, headers })
